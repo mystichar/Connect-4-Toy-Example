@@ -68,7 +68,6 @@ class Connect4:
             return -1
         else:  # "tie" or "undecided"
             return 0
-    
     def get_game_result_after_last_move(self, board, last_color):
         # Check for a winner after the last move
         for row in range(self.rows):

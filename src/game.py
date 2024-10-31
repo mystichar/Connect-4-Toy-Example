@@ -1,5 +1,6 @@
 import string
 import curses
+import time  # Import time for measuring execution duration
 from connect4 import Connect4
 
 class Connect4Game:
@@ -43,8 +44,17 @@ class Connect4Game:
         stdscr.refresh()
 
     def display_available_moves(self, stdscr):
+        # Start timing the simulation
+        start_time = time.time()
+        
         move_statistics = self.game.evaluate_move_statistics(depth=self.depth)
+        
+        # Calculate execution time
+        execution_time = time.time() - start_time
+        
         stdscr.addstr("Available moves:\n")
+        stdscr.addstr(f"Simulation execution time: {execution_time:.2f} seconds\n")  # Display execution time
+        stdscr.refresh()  # Ensure it refreshes immediately
 
         move_options = []
         for col, stats in move_statistics.items():
@@ -63,9 +73,10 @@ class Connect4Game:
             stdscr.addstr(f"Tie: {tie:.1f}%, ")
             stdscr.addstr(f"Undecided: {undecided:.1f}%\n")
 
-        return move_options
+        stdscr.refresh()  # Refresh at the end to show all output
+        return move_options, execution_time  # Return execution_time
 
-    def select_move(self, stdscr, move_options):
+    def select_move(self, stdscr, move_options, execution_time):
         idx = 0
         while True:
             col_letter, col, stats = move_options[idx]
@@ -75,6 +86,8 @@ class Connect4Game:
             row, col_pos = self.game.apply_move(new_board, col, self.current_player_color)
             # Display the board after the move
             stdscr.clear()
+            # Display the execution time here
+            stdscr.addstr(f"Simulation execution time: {execution_time:.2f} seconds\n")
             stdscr.addstr(f"Simulating move: {col_letter} - Column {col}\n")
             for r in range(self.game.rows):
                 stdscr.addstr("|")
@@ -130,14 +143,14 @@ class Connect4Game:
         self.display_board(stdscr)
 
         while True:
-            move_options = self.display_available_moves(stdscr)
+            move_options, execution_time = self.display_available_moves(stdscr)
             if not move_options:
                 stdscr.addstr("It's a draw! No more moves available.\n")
                 stdscr.refresh()
                 stdscr.getch()
                 break
 
-            selected_column = self.select_move(stdscr, move_options)
+            selected_column = self.select_move(stdscr, move_options, execution_time)
             row, col = self.game.apply_move(self.game.board, selected_column, self.current_player_color)
             self.display_board(stdscr)
 
