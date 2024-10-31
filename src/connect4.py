@@ -1,225 +1,166 @@
-# connect4.py
-from typing import Dict, Tuple
+from functools import lru_cache
 
 class Connect4:
-    def __init__(self, efficiency=True):
-        # Initialize a 5-tall by 7-wide empty board
-        self.board = {(row, col): 0 for row in range(5) for col in range(7)}
-
+    def __init__(self):
+        # Initialize a 6-row by 7-column board using a 2D list
+        self.rows = 6
+        self.cols = 7
+        self.board = [[0 for _ in range(self.cols)] for _ in range(self.rows)]
+    
     def get_board_state(self):
         return self.board
 
     def check_move_color(self):
-        # Determine turn based on piece count; default to 1 if even, else -1
-        piece_count = sum(1 for cell in self.board.values() if cell != 0)
+        # Determine turn based on the piece count; 1 if even (Red), -1 if odd (Yellow)
+        piece_count = sum(1 for row in self.board for cell in row if cell != 0)
         return 1 if piece_count % 2 == 0 else -1
 
     def get_valid_moves(self, board=None):
-        board = self.board if not board else board
-        max_row = max(row for row, _ in board.keys())
-        max_col = max(col for _, col in board.keys())
-        valid_columns = []
-
-        for col in range(max_col + 1):
-            for row in range(max_row + 1):
-                cell = board.get((row, col), None)
-                if cell == 0:
-                    above_cell = board.get((row + 1, col), None)
-                    if above_cell is not None or row == max_row:
-                        valid_columns.append(col)
-                    break
-                elif cell is None:
-                    break
-
+        board = self.board if board is None else board
+        # Valid moves are columns where the top cell is empty
+        valid_columns = [col for col in range(self.cols) if board[0][col] == 0]
         return valid_columns
 
-    def __str__(self) -> str:
-        color_map = {
-            0: " |",
-            1: "R|",   # Represent player 1 with 'R'
-            -1: "Y|"   # Represent player -1 with 'Y'
-        }
+    def apply_move(self, board, col, color):
+        # Place the piece in the lowest available row in the selected column
+        for row in reversed(range(self.rows)):
+            if board[row][col] == 0:
+                board[row][col] = color
+                return row, col  # Return the position where the piece was placed
+        return None  # The column is full; should not happen if checked before
 
-        max_row = max(row for row, _ in self.board.keys())
-        max_col = max(col for _, col in self.board.keys())
-
-        string = ""
-        for row in range(max_row, -1, -1):
-            string += "|"
-            for col in range(max_col + 1):
-                cell = self.board.get((row, col), None)
-                string += color_map[cell] if cell is not None else " |"
-            string += "\n"
-
-        return string
-
-    def check_winner(self, color=None, board=None):
-        if color is None:
-            color = -1 * self.check_move_color()
-
-        if board is None:
-            board = self.board  # Use the main game board if no specific board is provided
-
-        max_row = max(row for row, _ in board.keys())
-        max_col = max(col for _, col in board.keys())
-
-        # Directions: vertical, horizontal, diagonal down-right, diagonal down-left
-        directions = [
-            (1, 0),  # Vertical
-            (0, 1),  # Horizontal
-            (1, 1),  # Diagonal down-right
-            (1, -1)  # Diagonal down-left
-        ]
-
-        for row in range(max_row + 1):
-            for col in range(max_col + 1):
-                if board.get((row, col)) == color:
-                    for dr, dc in directions:
-                        if self._check_four_in_a_row(row, col, dr, dc, color, max_row, max_col, board):
+    def check_winner(self, board, color, row, col):
+        # Check all directions from the last move for a winning sequence
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]  # Horizontal, vertical, two diagonals
+        for dr, dc in directions:
+            count = 1  # Include the last move itself
+            for dir in [1, -1]:  # Check both positive and negative directions
+                r, c = row, col
+                while True:
+                    r += dr * dir
+                    c += dc * dir
+                    if 0 <= r < self.rows and 0 <= c < self.cols and board[r][c] == color:
+                        count += 1
+                        if count >= 4:
                             return True
+                    else:
+                        break
         return False
 
-    def _check_four_in_a_row(self, row, col, dr, dc, color, max_row, max_col, board=None):
-        board = self.board if not board else board
-        # Check boundaries and four consecutive pieces in the given direction
-        for i in range(4):
-            new_row = row + i * dr
-            new_col = col + i * dc
-            if new_row > max_row or new_row < 0 or new_col > max_col or new_col < 0:
-                return False
-            if board.get((new_row, new_col)) != color:
-                return False
-        return True
+    def is_full(self, board=None):
+        board = self.board if board is None else board
+        # The board is full if there are no empty cells in the top row
+        return all(cell != 0 for cell in board[0])
 
-    def get_game_result(self, board=None):
-        board = self.board if not board else board
-        if self.check_winner(1, board=board):
-            return "red_win"
-        elif self.check_winner(-1, board=board):
-            return "yellow_win"
+    def get_game_result(self, board, color, row, col):
+        if self.check_winner(board, color, row, col):
+            return "red_win" if color == 1 else "yellow_win"
         elif self.is_full(board):
             return "tie"
         else:
             return "undecided"
 
-    def apply_gravity(self):
-        # Find unique columns in the board data
-        columns = {col for row, col in self.board.keys()}
-        for col in columns:
-            # Collect all cells in the column, ordered from top to bottom
-            col_cells = sorted([row for row, c in self.board.keys() if c == col], reverse=True)
-            next_available_row = None
+    def evaluate_result(self, result):
+        # Assign numerical scores to game outcomes for the minimax algorithm
+        if result == "red_win":
+            return 1
+        elif result == "yellow_win":
+            return -1
+        else:  # "tie" or "undecided"
+            return 0
+    
+    def get_game_result_after_last_move(self, board, last_color):
+        # Check for a winner after the last move
+        for row in range(self.rows):
+            for col in range(self.cols):
+                if board[row][col] == last_color:
+                    if self.check_winner(board, last_color, row, col):
+                        return "red_win" if last_color == 1 else "yellow_win"
+        if self.is_full(board):
+            return "tie"
+        return "undecided"
 
-            for row in col_cells:
-                cell_value = self.board.get((row, col), None)
-
-                # If we encounter None, reset next available row (stop falling here)
-                if cell_value is None:
-                    next_available_row = None
-
-                elif cell_value == 0:
-                    # If it's an empty cell, set it as the next available row if none is set
-                    if next_available_row is None:
-                        next_available_row = row
-
-                elif cell_value in (-1, 1):
-                    # If there's a piece and we have an available row, move the piece down
-                    if next_available_row is not None and next_available_row != row:
-                        self.board[(next_available_row, col)] = cell_value
-                        self.board[(row, col)] = 0
-                        next_available_row -= 1  # Update next available position for further pieces
-                    else:
-                        # Set the next available row as one above the current piece
-                        next_available_row = row - 1
-
-    def evaluate_move_statistics(self, depth=4, smart_players=False):
+    def evaluate_move_statistics(self, depth=4):
         """
         Evaluate the statistics for each possible move.
         :param depth: int - The depth to explore moves.
-        :param smart_players: bool - If true, stops exploration when a winning move is found.
         :return: dict - Statistics for each move column.
         """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves(self.board)
         move_statistics = {}
+        self.memo = {}  # Reset memoization cache
 
         for col in valid_moves:
             # Create a copy of the board and apply the move
-            board_copy = self.board.copy()
-            self.apply_move(board_copy, col, color)
-
-            # Get statistics and move tree for this column
-            stats, move_tree = self.simulate_move_tree(board_copy, depth - 1, -color, smart_players=smart_players)
-            
+            new_board = [row[:] for row in self.board]
+            row, col_pos = self.apply_move(new_board, col, color)
+            # Get statistics for this move
+            stats = self.simulate_move_tree_statistics(new_board, depth - 1, -color)
             # Normalize statistics percentages
             total = sum(stats.values())
-            percentages = {key: (stats.get(key, 0) / total) * 100 for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
+            percentages = {key: (stats.get(key, 0) / total) * 100 if total > 0 else 0 for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
             move_statistics[col] = {
                 'percentages': percentages,
-                'move_tree': move_tree  # Attach the move tree for debugging or further analysis
             }
-
         return move_statistics
 
-    def simulate_move_tree(self, board, depth, current_color, smart_players=False):
-        result = self.get_game_result(board)
-        node = {
-            'board': board.copy(),
-            'result': result,
-            'children': []
-        }
-
+    def simulate_move_tree_statistics(self, board, depth, current_color):
+        result = self.get_game_result_after_last_move(board, -current_color)
         if result != "undecided" or depth == 0:
-            # Return the result and the node with no children
-            return ({result: 1}, node)
-
-        moves = self.get_valid_moves(board)
-        if not moves:
-            return ({"tie": 1}, node)
-
+            return {result: 1}
+        board_tuple = tuple(map(tuple, board))
+        key = (board_tuple, current_color, depth)
+        if key in self.memo:
+            return self.memo[key]
+        valid_moves = self.get_valid_moves(board)
+        if not valid_moves:
+            return {"tie": 1}
         results = {"red_win": 0, "yellow_win": 0, "tie": 0, "undecided": 0}
-        next_color = -current_color
-
-        for col in moves:
-            new_board = board.copy()
-            self.apply_move(new_board, col, current_color)
-
-            immediate_result = self.get_game_result(new_board)
-
-            if smart_players and immediate_result != "undecided":
-                # Immediate result detected
+        for col in valid_moves:
+            new_board = [row[:] for row in board]
+            row, col_pos = self.apply_move(new_board, col, current_color)
+            immediate_result = self.get_game_result(new_board, current_color, row, col_pos)
+            if immediate_result != "undecided":
                 outcome = {immediate_result: 1}
-                child_node = {
-                    'move': col,
-                    'board': new_board.copy(),
-                    'result': immediate_result,
-                    'children': []
-                }
             else:
-                # Continue exploring
-                outcome, child_node = self.simulate_move_tree(
-                    new_board, depth - 1, next_color, smart_players)
-
-                child_node['move'] = col
-
+                outcome = self.simulate_move_tree_statistics(new_board, depth - 1, -current_color)
             # Aggregate results
             for key in results:
                 results[key] += outcome.get(key, 0)
+        self.memo[key] = results
+        return results
+    def get_move_evaluations(self, depth=4):
+        """
+        Evaluate all valid moves and return their evaluations.
+        :param depth: int - The depth to explore moves.
+        :return: dict - Evaluations for each valid move.
+        """
+        color = self.check_move_color()
+        valid_moves = self.get_valid_moves(self.board)
+        move_evaluations = {}
+        self.memo = {}  # Reset memoization cache
 
-            node['children'].append(child_node)
+        for col in valid_moves:
+            new_board = [row[:] for row in self.board]
+            row, col_pos = self.apply_move(new_board, col, color)
+            result = self.get_game_result(new_board, color, row, col_pos)
+            if result == "red_win":
+                eval = 1
+            elif result == "yellow_win":
+                eval = -1
+            elif result == "tie":
+                eval = 0
+            else:
+                eval = self.simulate_move_tree(tuple(map(tuple, new_board)), depth - 1, -color, -float('inf'), float('inf'))
+            move_evaluations[col] = eval
 
-        return (results, node)
-    
-    def apply_move(self, board, col, color):
-        # Apply the move to a given board (copy) without altering the original board.
-        max_row = max(row for row, _ in board.keys())
-        for row in range(max_row + 1):
-            if board.get((row, col), 0) == 0:
-                board[(row, col)] = color
-                return
-        # If the column is full, do nothing
+        return move_evaluations
 
-    def is_full(self, board=None):
-        board = self.board if not board else board
-        return all(cell != 0 for cell in board.values() if cell is not None)
-
+    def __str__(self):
+        color_map = {0: ' . ', 1: ' R ', -1: ' Y '}
+        string = ''
+        for row in self.board:
+            string += '|' + ''.join([color_map[cell] for cell in row]) + '|\n'
+        string += '  ' + '  '.join(map(str, range(self.cols))) + '\n'
+        return string

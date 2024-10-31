@@ -6,12 +6,12 @@ class Connect4Game:
     def __init__(self, depth=4):
         self.game = Connect4()
         self.depth = depth
-        self.column_letters = string.ascii_uppercase[:7]  # Limit to 7 columns for Connect 4
+        self.column_letters = string.ascii_uppercase[:self.game.cols]  # Adjusted to match board columns
         self.current_player_color = 1  # Red starts
 
     def setup_colors(self, stdscr):
         curses.start_color()
-        curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)   # Red color for player 1
+        curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)     # Red color for player 1
         curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Yellow color for player -1
 
     def prompt_recursion_depth(self, stdscr):
@@ -26,13 +26,10 @@ class Connect4Game:
     def display_board(self, stdscr):
         stdscr.clear()
         stdscr.addstr("Current board:\n")
-
-        max_row = max(row for row, _ in self.game.board.keys())
-        max_col = max(col for _, col in self.game.board.keys())
-        for row in range(max_row, -1, -1):
+        for row in range(self.game.rows):
             stdscr.addstr("|")
-            for col in range(max_col + 1):
-                cell = self.game.board.get((row, col), 0)
+            for col in range(self.game.cols):
+                cell = self.game.board[row][col]
                 if cell == 1:
                     stdscr.addstr("0", curses.color_pair(1))
                 elif cell == -1:
@@ -41,21 +38,24 @@ class Connect4Game:
                     stdscr.addstr(" ")
                 stdscr.addstr("|")
             stdscr.addstr("\n")
+        # Display column letters for user reference
+        stdscr.addstr(" " + " ".join(self.column_letters) + "\n")
         stdscr.refresh()
 
     def display_available_moves(self, stdscr):
-        move_statistics = self.game.evaluate_move_statistics(depth=self.depth, smart_players=True)
+        move_statistics = self.game.evaluate_move_statistics(depth=self.depth)
         stdscr.addstr("Available moves:\n")
 
         move_options = []
-        for i, (col, stats) in enumerate(move_statistics.items()):
+        for col, stats in move_statistics.items():
             col_letter = self.column_letters[col]
             move_options.append((col_letter, col, stats))
 
-            red_win = stats['percentages']['red_win']
-            yellow_win = stats['percentages']['yellow_win']
-            tie = stats['percentages']['tie']
-            undecided = stats['percentages']['undecided']
+            percentages = stats['percentages']
+            red_win = percentages['red_win']
+            yellow_win = percentages['yellow_win']
+            tie = percentages['tie']
+            undecided = percentages['undecided']
 
             stdscr.addstr(f"{col_letter}: Column {col} - ")
             stdscr.addstr(f"Red Win: {red_win:.1f}%, ")
@@ -69,17 +69,32 @@ class Connect4Game:
         idx = 0
         while True:
             col_letter, col, stats = move_options[idx]
-            board_copy = self.game.board.copy()
-            self.game.apply_move(board_copy, col, self.current_player_color)
-            self.display_board(stdscr)
-            
+            percentages = stats['percentages']
+            # Create a copy of the board and apply the move for visualization
+            new_board = [row[:] for row in self.game.board]
+            row, col_pos = self.game.apply_move(new_board, col, self.current_player_color)
+            # Display the board after the move
+            stdscr.clear()
+            stdscr.addstr(f"Simulating move: {col_letter} - Column {col}\n")
+            for r in range(self.game.rows):
+                stdscr.addstr("|")
+                for c in range(self.game.cols):
+                    cell = new_board[r][c]
+                    if cell == 1:
+                        stdscr.addstr("0", curses.color_pair(1))
+                    elif cell == -1:
+                        stdscr.addstr("0", curses.color_pair(2))
+                    else:
+                        stdscr.addstr(" ")
+                    stdscr.addstr("|")
+                stdscr.addstr("\n")
+            stdscr.addstr(" " + " ".join(self.column_letters) + "\n")
             stdscr.addstr(f"\nMove: {col_letter} - Column {col}\n")
-            stdscr.addstr(f"Red Win: {stats['percentages']['red_win']:.1f}%\n")
-            stdscr.addstr(f"Yellow Win: {stats['percentages']['yellow_win']:.1f}%\n")
-            stdscr.addstr(f"Tie: {stats['percentages']['tie']:.1f}%\n")
-            stdscr.addstr(f"Undecided: {stats['percentages']['undecided']:.1f}%\n")
-
-            stdscr.addstr("\nUse arrow keys to navigate and press Enter to select.\n")
+            stdscr.addstr(f"Red Win: {percentages['red_win']:.1f}%\n")
+            stdscr.addstr(f"Yellow Win: {percentages['yellow_win']:.1f}%\n")
+            stdscr.addstr(f"Tie: {percentages['tie']:.1f}%\n")
+            stdscr.addstr(f"Undecided: {percentages['undecided']:.1f}%\n")
+            stdscr.addstr("\nUse LEFT/RIGHT arrow keys to navigate and press ENTER to select.\n")
             stdscr.refresh()
 
             key = stdscr.getch()
@@ -88,17 +103,23 @@ class Connect4Game:
             elif key == curses.KEY_RIGHT and idx < len(move_options) - 1:
                 idx += 1
             elif key in [curses.KEY_ENTER, 10, 13]:
-                return move_options[idx][1]  # Return the selected column
+                return col  # Return the selected column
 
     def switch_player(self):
         self.current_player_color *= -1
 
-    def check_for_winner(self, stdscr):
-        if self.game.check_winner(self.current_player_color):
+    def check_for_winner(self, stdscr, row, col):
+        result = self.game.get_game_result(self.game.board, self.current_player_color, row, col)
+        if result == "red_win" or result == "yellow_win":
             color_name = "Red" if self.current_player_color == 1 else "Yellow"
             stdscr.addstr(f"{color_name} wins!\n")
             stdscr.refresh()
             stdscr.getch()  # Wait for key press before exiting
+            return True
+        elif result == "tie":
+            stdscr.addstr("It's a tie!\n")
+            stdscr.refresh()
+            stdscr.getch()
             return True
         return False
 
@@ -117,10 +138,10 @@ class Connect4Game:
                 break
 
             selected_column = self.select_move(stdscr, move_options)
-            self.game.apply_move(self.game.board, selected_column, self.current_player_color)
+            row, col = self.game.apply_move(self.game.board, selected_column, self.current_player_color)
             self.display_board(stdscr)
 
-            if self.check_for_winner(stdscr):
+            if self.check_for_winner(stdscr, row, col):
                 break
 
             self.switch_player()
