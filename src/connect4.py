@@ -217,17 +217,79 @@ class connect4:
 
             mini_classes= {}
             max_mini_heat_order = []
-            vert_heat = 0 if not( coords in vert_spots.keys()) else vert_spots[coords]
+            vert_heat  = 0 if not( coords in vert_spots.keys() ) else  vert_spots[coords]
             horiz_heat = 0 if not( coords in horiz_spots.keys()) else horiz_spots[coords]
             TL_BR_heat = 0 if not( coords in TL_BR_spots.keys()) else TL_BR_spots[coords]
             TR_BL_heat = 0 if not( coords in TR_BL_spots.keys()) else TR_BL_spots[coords] # replace with similar ranking system to total heat
 
-            classes[heat].append((coords, vert_heat, horiz_heat, TL_BR_heat, TR_BL_heat ))
+            classes[heat].append((coords, vert_heat, horiz_heat, TL_BR_heat, TR_BL_heat))
 
         print("Heat Classes")
         print(classes)
         print("Highest heat")
         print(max_heat_order[-1])
+
+        # For each max_heat_order, starting with highest one:
+        #   for each class:
+        #   find the highest heat approaches. 
+        #       for each approach in the class of highest heat approaches:
+        #          add one to the corresponding consecutive
+        pass
+
+    def check_win_brute_force(self, board=None, color=None):
+        board = self.board if not board else board
+        piece_color = -1 * (self.check_move_color()) if not color else color  # check last piece moved by default
+
+        width = len(board)
+        height = len(board[0])
+
+        # Horizontal lines
+        for row in range(height):
+            for col in range(width - 3):
+                count = 0
+                for i in range(4):
+                    if board[row][col + i] == piece_color:
+                        count += 1
+                if count == 4:
+                    return True
+
+        # Vertical lines
+        for col in range(width):
+            for row in range(height - 3):
+                count = 0
+                for i in range(4):
+                    if board[row + i][col] == piece_color:
+                        count += 1
+                if count == 4:
+                    return True
+
+        # Diagonal down-right lines
+        for row in range(height - 3):
+            for col in range(width - 3):
+                count = 0
+                for i in range(4):
+                    if board[row + i][col + i] == piece_color:
+                        count += 1
+                if count == 4:
+                    return True
+
+        # Diagonal up-right lines
+        for row in range(3, height):
+            for col in range(width - 3):
+                count = 0
+                for i in range(4):
+                    if board[row - i][col + i] == piece_color:
+                        count += 1
+                if count == 4:
+                    return True
+
+        return False
+
+    def check_win_DFS(self, board=None, already_traveled_board=None):
+        board = self.board if not board else board
+        # set default already traveled to 0
+        already_traveled_board = self.generate_matrix() if not already_traveled_board else already_traveled_board
+        pass
 
 
     def generate_matrix(self, height=None, width=None, default_value=0):

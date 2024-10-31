@@ -14,6 +14,9 @@ RUN apt-get update && \
 
 # Install Cirq using pip
 RUN pip install --no-cache-dir cirq
+RUN pip install --no-cache-dir pytest
+RUN pip install --no-cache-dir pytest-dependency
+RUN pip install --upgrade pip
 
 # Define the working directory inside the container
 WORKDIR /workspace/src
