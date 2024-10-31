@@ -1,5 +1,5 @@
 # objective: brute force calculate the probability of winning based on each move
-from .board_model import Connect4Board
+from board_model import Connect4Board
 
 class Connect4:
     def __init__(self, board_model: Connect4Board = None):
