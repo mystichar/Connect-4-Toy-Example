@@ -76,47 +76,6 @@ class Connect4Game:
         stdscr.refresh()  # Refresh at the end to show all output
         return move_options, execution_time  # Return execution_time
 
-    def select_move(self, stdscr, move_options, execution_time):
-        idx = 0
-        while True:
-            col_letter, col, stats = move_options[idx]
-            percentages = stats['percentages']
-            # Create a copy of the board and apply the move for visualization
-            new_board = [row[:] for row in self.game.board]
-            row, col_pos = self.game.apply_move(new_board, col, self.current_player_color)
-            # Display the board after the move
-            stdscr.clear()
-            # Display the execution time here
-            stdscr.addstr(f"Simulation execution time: {execution_time:.2f} seconds\n")
-            stdscr.addstr(f"Simulating move: {col_letter} - Column {col}\n")
-            for r in range(self.game.rows):
-                stdscr.addstr("|")
-                for c in range(self.game.cols):
-                    cell = new_board[r][c]
-                    if cell == 1:
-                        stdscr.addstr("0", curses.color_pair(1))
-                    elif cell == -1:
-                        stdscr.addstr("0", curses.color_pair(2))
-                    else:
-                        stdscr.addstr(" ")
-                    stdscr.addstr("|")
-                stdscr.addstr("\n")
-            stdscr.addstr(" " + " ".join(self.column_letters) + "\n")
-            stdscr.addstr(f"\nMove: {col_letter} - Column {col}\n")
-            stdscr.addstr(f"Red Win: {percentages['red_win']:.1f}%\n")
-            stdscr.addstr(f"Yellow Win: {percentages['yellow_win']:.1f}%\n")
-            stdscr.addstr(f"Tie: {percentages['tie']:.1f}%\n")
-            stdscr.addstr(f"Undecided: {percentages['undecided']:.1f}%\n")
-            stdscr.addstr("\nUse LEFT/RIGHT arrow keys to navigate and press ENTER to select.\n")
-            stdscr.refresh()
-
-            key = stdscr.getch()
-            if key == curses.KEY_LEFT and idx > 0:
-                idx -= 1
-            elif key == curses.KEY_RIGHT and idx < len(move_options) - 1:
-                idx += 1
-            elif key in [curses.KEY_ENTER, 10, 13]:
-                return col  # Return the selected column
 
     def switch_player(self):
         self.current_player_color *= -1

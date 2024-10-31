@@ -1,5 +1,3 @@
-# docker-compose.yml
-
 version: '3.8'
 
 services:
@@ -10,3 +8,10 @@ services:
     volumes:
       - ./src:/workspace/src
     tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
