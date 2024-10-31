@@ -16,6 +16,7 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir cirq
 RUN pip install --no-cache-dir pytest
 RUN pip install --no-cache-dir pytest-dependency
+RUN pip install --no-cache-dir pydantic
 RUN pip install --upgrade pip
 
 # Define the working directory inside the container
