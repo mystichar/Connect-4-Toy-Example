@@ -2,7 +2,7 @@
 from typing import Dict, Tuple
 
 class Connect4:
-    def __init__(self):
+    def __init__(self, efficiency=True):
         # Initialize a 5-tall by 7-wide empty board
         self.board = {(row, col): 0 for row in range(5) for col in range(7)}
 
