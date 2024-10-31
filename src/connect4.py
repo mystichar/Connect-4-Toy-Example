@@ -9,6 +9,9 @@ class Connect4:
             # Initialize a 5-tall by 7-wide empty board
             self.board = {(row, col): 0 for row in range(5) for col in range(7)}
 
+    def get_board_state(self):
+        return self.board
+
     def check_move_color(self):
         # Determine turn based on piece count; default to 1 if even, else -1
         piece_count = sum(1 for cell in self.board.values() if cell != 0)
