@@ -1,7 +1,11 @@
 # Dockerfile
 
-# Start from an official Python image with a specific version, like Python 3.10
-FROM python:3.10-slim
+# Use an official NVIDIA CUDA image with a specific CUDA version
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+# Set environment variables for CUDA
+ENV CUDA_VERSION=11.8
+ENV CUDNN_VERSION=8
 
 # Update and install dependencies
 RUN apt-get update && \
@@ -9,15 +13,21 @@ RUN apt-get update && \
     texlive-latex-base \
     latexmk \
     sudo \
+    python3-pip \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Cirq using pip
-RUN pip install --no-cache-dir cirq
-RUN pip install --no-cache-dir pytest
-RUN pip install --no-cache-dir pytest-dependency
-RUN pip install --no-cache-dir pydantic
-RUN pip install --upgrade pip
+# Upgrade pip and install Python packages
+RUN pip3 install --upgrade pip
+
+# Install PyTorch with CUDA support
+RUN pip3 install torch --extra-index-url https://download.pytorch.org/whl/cu118
+
+# Install other Python dependencies
+RUN pip3 install --no-cache-dir cirq \
+    pytest \
+    pytest-dependency \
+    pydantic
 
 # Define the working directory inside the container
 WORKDIR /workspace/src
