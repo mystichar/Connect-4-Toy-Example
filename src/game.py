@@ -113,12 +113,12 @@ class Connect4Game:
         self.current_player_color *= -1
 
     def check_for_winner(self, stdscr, row, col):
-        result = self.game.get_game_result(self.game.board, self.current_player_color)
+        result = self.game.get_game_result(self.game.board, self.current_player_color, row, col)
         if result == "red_win" or result == "yellow_win":
             color_name = "Red" if self.current_player_color == 1 else "Yellow"
             stdscr.addstr(f"{color_name} wins!\n")
             stdscr.refresh()
-            stdscr.getch()
+            stdscr.getch()  # Wait for key press before exiting
             return True
         elif result == "tie":
             stdscr.addstr("It's a tie!\n")
