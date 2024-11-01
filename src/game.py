@@ -160,4 +160,8 @@ class Connect4Game:
             self.switch_player()
 
 if __name__ == "__main__":
-    curses.wrapper(Connect4Game().play)
+    game_instance = Connect4Game()
+    try:
+        curses.wrapper(game_instance.play)
+    finally:
+        game_instance.game.cleanup()
