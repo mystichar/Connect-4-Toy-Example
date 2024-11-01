@@ -1,4 +1,6 @@
+from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
+from multiprocessing import Manager
 
 class Connect4:
     def __init__(self):
@@ -68,6 +70,7 @@ class Connect4:
             return -1
         else:  # "tie" or "undecided"
             return 0
+    
     def get_game_result_after_last_move(self, board, last_color):
         # Check for a winner after the last move
         for row in range(self.rows):
@@ -78,43 +81,48 @@ class Connect4:
         if self.is_full(board):
             return "tie"
         return "undecided"
-
+    
     def evaluate_move_statistics(self, depth=4):
-        """
-        Evaluate the statistics for each possible move.
-        :param depth: int - The depth to explore moves.
-        :return: dict - Statistics for each move column.
-        """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves(self.board)
-        move_statistics = {}
-        self.memo = {}  # Reset memoization cache
+        move_statistics = Manager().dict()  # Shared memory for parallel processing
 
-        for col in valid_moves:
-            # Create a copy of the board and apply the move
-            new_board = [row[:] for row in self.board]
-            row, col_pos = self.apply_move(new_board, col, color)
-            # Get statistics for this move
-            stats = self.simulate_move_tree_statistics(new_board, depth - 1, -color)
-            # Normalize statistics percentages
-            total = sum(stats.values())
-            percentages = {key: (stats.get(key, 0) / total) * 100 if total > 0 else 0 for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
-            move_statistics[col] = {
-                'percentages': percentages,
-            }
-        return move_statistics
+        with ProcessPoolExecutor() as executor:
+            futures = []
+            for col in valid_moves:
+                new_board = [row[:] for row in self.board]
+                row, col_pos = self.apply_move(new_board, col, color)
+                # Submit each move evaluation to the process pool
+                futures.append(executor.submit(self.evaluate_single_move, new_board, depth - 1, -color, col, {}))  # Pass an empty dictionary for memo
 
-    def simulate_move_tree_statistics(self, board, depth, current_color):
+            for future in futures:
+                col, stats = future.result()
+                # Normalize percentages for each result
+                total = sum(stats.values())
+                percentages = {key: (stats.get(key, 0) / total) * 100 if total > 0 else 0 for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
+                move_statistics[col] = {'percentages': percentages}
+
+        return dict(move_statistics)  # Convert Manager dict to regular dict for return
+
+    def evaluate_single_move(self, board, depth, color, col, memo):
+        # Perform a single move simulation to support parallelism
+        stats = self.simulate_move_tree_statistics(board, depth, color, memo)
+        return col, stats
+
+    def simulate_move_tree_statistics(self, board, depth, current_color, memo):
         result = self.get_game_result_after_last_move(board, -current_color)
         if result != "undecided" or depth == 0:
             return {result: 1}
+        
         board_tuple = tuple(map(tuple, board))
         key = (board_tuple, current_color, depth)
-        if key in self.memo:
-            return self.memo[key]
+        if key in memo:
+            return memo[key]
+
         valid_moves = self.get_valid_moves(board)
         if not valid_moves:
             return {"tie": 1}
+
         results = {"red_win": 0, "yellow_win": 0, "tie": 0, "undecided": 0}
         for col in valid_moves:
             new_board = [row[:] for row in board]
@@ -123,12 +131,15 @@ class Connect4:
             if immediate_result != "undecided":
                 outcome = {immediate_result: 1}
             else:
-                outcome = self.simulate_move_tree_statistics(new_board, depth - 1, -current_color)
+                outcome = self.simulate_move_tree_statistics(new_board, depth - 1, -current_color, memo)
+            
             # Aggregate results
             for key in results:
                 results[key] += outcome.get(key, 0)
-        self.memo[key] = results
+
+        memo[key] = results  # Cache results in the memo dictionary
         return results
+
     def get_move_evaluations(self, depth=4):
         """
         Evaluate all valid moves and return their evaluations.
