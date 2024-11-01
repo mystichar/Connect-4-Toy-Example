@@ -63,7 +63,7 @@ class Connect4:
         if self.is_full(board):
             return "tie"
         return "undecided"
-    
+       
     def get_game_results_after_last_move(self, boards, last_color):
         """
         Check for a winner after the last move for a batch of boards.
