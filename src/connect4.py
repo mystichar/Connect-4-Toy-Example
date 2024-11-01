@@ -106,20 +106,20 @@ class Connect4:
         :return: dict - Statistics for each move column.
         """
         color = self.check_move_color()
-        valid_moves = self.get_valid_moves(self.board)
+        valid_moves = self.get_valid_moves()  # Corrected line
         move_statistics = {}
         self.memo = {}  # Reset memoization cache
 
         for col in valid_moves:
             # Create a copy of the board and apply the move
             new_board = self.board.copy()
-            self.apply_move(new_board, col, color)
+            row, col_pos = self.apply_move(new_board, col, color)
             # Get statistics for this move
             stats = self.simulate_move_tree_statistics(new_board, depth - 1, -color)
             # Normalize statistics percentages
             total = sum(stats.values())
             percentages = {key: (stats.get(key, 0) / total) * 100 if total > 0 else 0
-                           for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
+                        for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
             move_statistics[col] = {
                 'percentages': percentages,
             }
