@@ -2,7 +2,6 @@ import numpy as np
 import pycuda.autoinit
 import pycuda.driver as drv
 from pycuda.compiler import SourceModule
-import itertools
 
 class Connect4:
     def __init__(self):
@@ -125,54 +124,32 @@ class Connect4:
         else:
             return "undecided"
 
-    def generate_move_sequences(self, valid_columns, depth):
-        """
-        Generates all possible move sequences up to the given depth.
-        """
-        sequences = list(itertools.product(valid_columns, repeat=depth))
-        return sequences
-
-
     def evaluate_move_statistics(self, depth=2):
         """
-        Evaluate the statistics for each possible move using GPU acceleration and matrix operations.
+        Evaluate the statistics for each possible move using GPU acceleration.
         """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves()
         move_statistics = {}
 
-        # Generate all possible move sequences up to the given depth
-        sequences = self.generate_move_sequences(valid_moves, depth)
+        M = len(valid_moves)
+        if M == 0:
+            return move_statistics  # No valid moves available
 
-        # Simulate these sequences to get the board states
-        boards_to_evaluate = []
-        colors_to_evaluate = []
-        initial_moves = []
+        total_sequences = M ** depth
 
-        for seq in sequences:
-            temp_board = self.board.copy()
-            current_color = color
-            valid_sequence = True
-            for col in seq:
-                if temp_board[0, col] != 0:
-                    valid_sequence = False  # Column is full
-                    break
-                row, _ = self.apply_move(temp_board, col, current_color)
-                current_color *= -1  # Switch player
-            if valid_sequence:
-                boards_to_evaluate.append(temp_board.flatten())
-                colors_to_evaluate.append(current_color)
-                initial_moves.append(seq[0])  # First move in the sequence
+        # Precompute powers of M for efficient calculation
+        M_powers = [M ** i for i in reversed(range(depth))]
 
-        if not boards_to_evaluate:
+        num_boards = total_sequences
+        if num_boards == 0:
             return move_statistics  # No moves to evaluate
 
-        num_boards = len(boards_to_evaluate)
-        boards_array = np.array(boards_to_evaluate, dtype=np.int32)
+        # Prepare data for GPU
+        boards_array = np.tile(self.board.flatten(), (num_boards, 1)).astype(np.int32)
 
-        # Prepare solution filters
-        solution_filters = self.solution_filters
-        num_filters = solution_filters.shape[0]
+        # Map valid moves to indices
+        valid_moves_array = np.array(valid_moves, dtype=np.int32)
 
         # Allocate GPU memory
         results_array = np.zeros(num_boards, dtype=np.int32)
@@ -181,21 +158,82 @@ class Connect4:
         boards_gpu = drv.mem_alloc(boards_array.nbytes)
         drv.memcpy_htod(boards_gpu, boards_array)
 
-        filters_gpu = drv.mem_alloc(solution_filters.nbytes)
-        drv.memcpy_htod(filters_gpu, solution_filters)
+        filters_gpu = drv.mem_alloc(self.solution_filters.nbytes)
+        drv.memcpy_htod(filters_gpu, self.solution_filters)
 
         results_gpu = drv.mem_alloc(results_array.nbytes)
 
-        # Define the GPU kernel (same as before)
+        valid_moves_gpu = drv.mem_alloc(valid_moves_array.nbytes)
+        drv.memcpy_htod(valid_moves_gpu, valid_moves_array)
+
+        M_powers_array = np.array(M_powers, dtype=np.int32)
+        M_powers_gpu = drv.mem_alloc(M_powers_array.nbytes)
+        drv.memcpy_htod(M_powers_gpu, M_powers_array)
+
+        # Define the GPU kernel
         mod = SourceModule("""
+        __device__ int int_pow(int base, int exp) {
+            int result = 1;
+            for (int i = 0; i < exp; i++) {
+                result *= base;
+            }
+            return result;
+        }
+
+        __device__ int apply_moves(int *board, int num_moves,
+                                   int depth, int cols, int *valid_moves, int num_valid_moves,
+                                   int starting_color, int *M_powers) {
+            int color = starting_color;
+            int temp_num_moves = num_moves;
+
+            for (int d = 0; d < depth; d++) {
+                int move_idx = temp_num_moves / M_powers[d];
+                temp_num_moves = temp_num_moves % M_powers[d];
+
+                if (move_idx >= num_valid_moves) {
+                    return 0;  // Invalid move index
+                }
+
+                int col = valid_moves[move_idx];
+
+                // Find the lowest empty row in column
+                int row = -1;
+                for (int r = 5; r >= 0; r--) {
+                    if (board[r * cols + col] == 0) {
+                        row = r;
+                        break;
+                    }
+                }
+                if (row == -1) {
+                    return 0;  // Column is full
+                }
+
+                board[row * cols + col] = color;
+                color *= -1;  // Switch player
+            }
+            return 1;  // Valid move sequence
+        }
+
         __global__ void evaluate_positions(int *boards, int *filters, int *results,
-                                        int num_boards, int num_filters, int board_size) {
+                                           int num_boards, int num_filters, int board_size,
+                                           int depth, int *valid_moves, int num_valid_moves,
+                                           int starting_color, int cols, int *M_powers) {
             int idx = blockIdx.x * blockDim.x + threadIdx.x;
             if (idx >= num_boards) return;
 
             int *board = &boards[idx * board_size];
+            int num_moves = idx;
+
+            // Apply moves
+            int valid = apply_moves(board, num_moves, depth, cols, valid_moves, num_valid_moves, starting_color, M_powers);
+            if (!valid) {
+                results[idx] = 0;  // Invalid sequence
+                return;
+            }
+
             int result = 0;  // 0: undecided, 1: red win, -1: yellow win
 
+            // Evaluate board
             for (int f = 0; f < num_filters; f++) {
                 int *filter = &filters[f * board_size];
                 int match_red = 1;
@@ -227,6 +265,7 @@ class Connect4:
         """)
 
         func = mod.get_function("evaluate_positions")
+
         block_size = 256
         grid_size = (num_boards + block_size - 1) // block_size
 
@@ -235,8 +274,14 @@ class Connect4:
             filters_gpu,
             results_gpu,
             np.int32(num_boards),
-            np.int32(num_filters),
+            np.int32(self.solution_filters.shape[0]),
             np.int32(self.rows * self.cols),
+            np.int32(depth),
+            valid_moves_gpu,
+            np.int32(len(valid_moves)),
+            np.int32(color),
+            np.int32(self.cols),
+            M_powers_gpu,
             block=(block_size, 1, 1),
             grid=(grid_size, 1)
         )
@@ -246,8 +291,18 @@ class Connect4:
 
         # Aggregate results based on the initial move
         move_results = {}
-        for idx, initial_move in enumerate(initial_moves):
+        for idx in range(num_boards):
             result = results_array[idx]
+            num_moves = idx
+            if result == 0:
+                continue  # Skip invalid sequences
+
+            # Calculate initial move index
+            temp_num_moves = num_moves
+            initial_move_idx = temp_num_moves // M_powers[0]
+
+            initial_move = valid_moves[initial_move_idx]
+
             if initial_move not in move_results:
                 move_results[initial_move] = {'red_win': 0, 'yellow_win': 0, 'undecided': 0}
 
@@ -262,7 +317,6 @@ class Connect4:
         for col, stats in move_results.items():
             total = sum(stats.values())
             percentages = {key: (value / total) * 100 if total > 0 else 0 for key, value in stats.items()}
-            # Add tie percentage as 0 since we don't calculate ties here
             percentages['tie'] = 0.0
             move_statistics[col] = {'percentages': percentages}
 
