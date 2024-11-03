@@ -2,6 +2,7 @@ import numpy as np
 import pycuda.autoinit
 import pycuda.driver as drv
 from pycuda.compiler import SourceModule
+import itertools
 
 class Connect4:
     def __init__(self):
@@ -124,60 +125,50 @@ class Connect4:
         else:
             return "undecided"
 
+    def generate_move_sequences(self, valid_columns, depth):
+        """
+        Generates all possible move sequences up to the given depth.
+        """
+        sequences = list(itertools.product(valid_columns, repeat=depth))
+        return sequences
+
+
     def evaluate_move_statistics(self, depth=2):
         """
-        Evaluate the statistics for each possible move using GPU acceleration.
+        Evaluate the statistics for each possible move using GPU acceleration and matrix operations.
         """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves()
         move_statistics = {}
 
-        # Prepare data for GPU
+        # Generate all possible move sequences up to the given depth
+        sequences = self.generate_move_sequences(valid_moves, depth)
+
+        # Simulate these sequences to get the board states
         boards_to_evaluate = []
         colors_to_evaluate = []
-        moves_sequence = []
+        initial_moves = []
 
-        # Initial moves
-        for col in valid_moves:
-            new_board = self.board.copy()
-            row, col_pos = self.apply_move(new_board, col, color)
-            boards_to_evaluate.append(new_board.flatten())
-            colors_to_evaluate.append(-color)
-            moves_sequence.append([col])
-            # Store the last move positions for result checking
-            last_moves = [(row, col_pos)]
-
-        # Perform recursive move generation up to the specified depth
-        for d in range(1, depth):
-            new_boards = []
-            new_colors = []
-            new_moves_sequence = []
-            new_last_moves = []
-            for idx, board_flat in enumerate(boards_to_evaluate):
-                board = board_flat.reshape((self.rows, self.cols))
-                current_color = colors_to_evaluate[idx]
-                sequence = moves_sequence[idx]
-                valid_moves = self.get_valid_moves(board)
-
-                for col in valid_moves:
-                    next_board = board.copy()
-                    row, col_pos = self.apply_move(next_board, col, current_color)
-                    new_boards.append(next_board.flatten())
-                    new_colors.append(-current_color)
-                    new_moves_sequence.append(sequence + [col])
-                    new_last_moves.append((row, col_pos))
-
-            boards_to_evaluate = new_boards
-            colors_to_evaluate = new_colors
-            moves_sequence = new_moves_sequence
-            last_moves = new_last_moves
+        for seq in sequences:
+            temp_board = self.board.copy()
+            current_color = color
+            valid_sequence = True
+            for col in seq:
+                if temp_board[0, col] != 0:
+                    valid_sequence = False  # Column is full
+                    break
+                row, _ = self.apply_move(temp_board, col, current_color)
+                current_color *= -1  # Switch player
+            if valid_sequence:
+                boards_to_evaluate.append(temp_board.flatten())
+                colors_to_evaluate.append(current_color)
+                initial_moves.append(seq[0])  # First move in the sequence
 
         if not boards_to_evaluate:
             return move_statistics  # No moves to evaluate
 
         num_boards = len(boards_to_evaluate)
         boards_array = np.array(boards_to_evaluate, dtype=np.int32)
-        colors_array = np.array(colors_to_evaluate, dtype=np.int32)
 
         # Prepare solution filters
         solution_filters = self.solution_filters
@@ -195,45 +186,45 @@ class Connect4:
 
         results_gpu = drv.mem_alloc(results_array.nbytes)
 
-        # Define the GPU kernel
+        # Define the GPU kernel (same as before)
         mod = SourceModule("""
-    __global__ void evaluate_positions(int *boards, int *filters, int *results,
-                                       int num_boards, int num_filters, int board_size) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= num_boards) return;
+        __global__ void evaluate_positions(int *boards, int *filters, int *results,
+                                        int num_boards, int num_filters, int board_size) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= num_boards) return;
 
-        int *board = &boards[idx * board_size];
-        int result = 0;  // 0: undecided, 1: red win, -1: yellow win
+            int *board = &boards[idx * board_size];
+            int result = 0;  // 0: undecided, 1: red win, -1: yellow win
 
-        for (int f = 0; f < num_filters; f++) {
-            int *filter = &filters[f * board_size];
-            int match_red = 1;
-            int match_yellow = 1;
+            for (int f = 0; f < num_filters; f++) {
+                int *filter = &filters[f * board_size];
+                int match_red = 1;
+                int match_yellow = 1;
 
-            for (int i = 0; i < board_size; i++) {
-                if (filter[i] == 1) {
-                    if (board[i] != 1) {
-                        match_red = 0;
+                for (int i = 0; i < board_size; i++) {
+                    if (filter[i] == 1) {
+                        if (board[i] != 1) {
+                            match_red = 0;
+                        }
+                        if (board[i] != -1) {
+                            match_yellow = 0;
+                        }
                     }
-                    if (board[i] != -1) {
-                        match_yellow = 0;
-                    }
+                }
+
+                if (match_red) {
+                    result = 1;
+                    break;
+                }
+                if (match_yellow) {
+                    result = -1;
+                    break;
                 }
             }
 
-            if (match_red) {
-                result = 1;
-                break;
-            }
-            if (match_yellow) {
-                result = -1;
-                break;
-            }
+            results[idx] = result;
         }
-
-        results[idx] = result;
-    }
-    """)
+        """)
 
         func = mod.get_function("evaluate_positions")
         block_size = 256
@@ -255,8 +246,7 @@ class Connect4:
 
         # Aggregate results based on the initial move
         move_results = {}
-        for idx, sequence in enumerate(moves_sequence):
-            initial_move = sequence[0]
+        for idx, initial_move in enumerate(initial_moves):
             result = results_array[idx]
             if initial_move not in move_results:
                 move_results[initial_move] = {'red_win': 0, 'yellow_win': 0, 'undecided': 0}
