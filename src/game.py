@@ -42,10 +42,10 @@ class Connect4Game:
             stdscr.addstr("\n")
         stdscr.addstr(" " + " ".join(self.column_letters) + "\n")
         stdscr.refresh()
-
+            
     def display_available_moves(self, stdscr):
         start_time = time.time()
-        move_statistics = self.game.evaluate_move_statistics(depth=self.depth)
+        move_statistics = self.game.monte_carlo_simulation(num_simulations=100000)
         execution_time = time.time() - start_time
 
         stdscr.addstr("Available moves:\n")
@@ -56,13 +56,8 @@ class Connect4Game:
         for col, stats in move_statistics.items():
             col_letter = self.column_letters[col]
             move_options.append((col_letter, col, stats))
-
-            percentages = stats['percentages']
-            stdscr.addstr(f"{col_letter}: Column {col} - ")
-            stdscr.addstr(f"Red Win: {percentages['red_win']:.1f}%, ")
-            stdscr.addstr(f"Yellow Win: {percentages['yellow_win']:.1f}%, ")
-            stdscr.addstr(f"Tie: {percentages['tie']:.1f}%, ")
-            stdscr.addstr(f"Undecided: {percentages['undecided']:.1f}%\n")
+            win_rate = stats['win_rate']
+            stdscr.addstr(f"{col_letter}: Column {col} - Win Rate: {win_rate:.1f}%\n")
 
         stdscr.refresh()
         return move_options, execution_time
