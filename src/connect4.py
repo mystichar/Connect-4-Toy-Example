@@ -123,165 +123,160 @@ class Connect4:
             return "tie"
         else:
             return "undecided"
-
+            
     def evaluate_move_statistics(self, depth=2):
-        """
-        Evaluate the statistics for each possible move using GPU acceleration.
-        """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves()
         move_statistics = {}
 
-        M = len(valid_moves)
-        if M == 0:
-            return move_statistics  # No valid moves available
+        num_valid_moves = len(valid_moves)
+        num_sequences = num_valid_moves ** depth
 
-        total_sequences = M ** depth
-
-        # Precompute powers of M for efficient calculation
-        M_powers = [M ** i for i in reversed(range(depth))]
-
-        num_boards = total_sequences
-        if num_boards == 0:
+        if num_sequences == 0:
             return move_statistics  # No moves to evaluate
 
         # Prepare data for GPU
-        boards_array = np.tile(self.board.flatten(), (num_boards, 1)).astype(np.int32)
-
-        # Map valid moves to indices
         valid_moves_array = np.array(valid_moves, dtype=np.int32)
+        boards_initial = self.board.flatten().astype(np.int32)
+        solution_filters = self.solution_filters
+        num_filters = solution_filters.shape[0]
+        # Define the GPU kernel
+        mod = SourceModule("""
+// Define constants
+#define MAX_DEPTH 4
+#define BOARD_SIZE 42
+#define NUM_FILTERS 69
+#define ROWS 6
+#define COLS 7
+#define INVALID_SEQUENCE -2
+#define RED_WIN 1
+#define YELLOW_WIN -1
+#define UNDECIDED 0
 
-        # Allocate GPU memory
-        results_array = np.zeros(num_boards, dtype=np.int32)
+// Declare solution filters in constant memory
+__constant__ int solution_filters_const[NUM_FILTERS * BOARD_SIZE];
+
+extern "C" __global__ void simulate_and_evaluate(
+    const int *valid_moves,        // Array of valid moves (columns)
+    const int num_valid_moves,     // Number of valid moves
+    const int depth,               // Search depth
+    int *results,                  // Output array for results
+    const int *boards_initial,     // Initial board state
+    const unsigned long long num_sequences  // Total number of sequences
+) {
+    // Compute the global thread index
+    unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total_threads = gridDim.x * blockDim.x;
+
+    // Each thread simulates multiple sequences to increase GPU utilization
+    for (; idx < num_sequences; idx += total_threads) {
+        // Initialize the board with the initial state
+        int board[BOARD_SIZE];
+        for (int i = 0; i < BOARD_SIZE; i++) {
+            board[i] = boards_initial[i];
+        }
+
+        // Generate the move sequence based on idx
+        int sequence[MAX_DEPTH];
+        unsigned long long temp_idx = idx;
+        for (int d = depth - 1; d >= 0; d--) {
+            sequence[d] = valid_moves[temp_idx % num_valid_moves];
+            temp_idx /= num_valid_moves;
+        }
+
+        // Simulate the move sequence
+        int current_color = 1;  // Starting color (1 for Red)
+        bool valid_sequence = true;
+        for (int d = 0; d < depth; d++) {
+            int col = sequence[d];
+            bool move_made = false;
+            // Find the lowest empty row in the column
+            for (int row = ROWS - 1; row >= 0; row--) {
+                int idx_board = row * COLS + col;
+                if (board[idx_board] == 0) {
+                    board[idx_board] = current_color;
+                    move_made = true;
+                    break;
+                }
+            }
+            if (!move_made) {
+                // Column is full; invalid sequence
+                valid_sequence = false;
+                break;
+            }
+            // Switch player
+            current_color = -current_color;
+        }
+
+        if (!valid_sequence) {
+            results[idx] = INVALID_SEQUENCE;
+            continue;
+        }
+
+        // Evaluate the board state for a win
+        int result = UNDECIDED;
+
+        // Iterate over the solution filters
+        for (int f = 0; f < NUM_FILTERS; f++) {
+            const int *filter = &solution_filters_const[f * BOARD_SIZE];
+            bool match_red = true;
+            bool match_yellow = true;
+
+            // Check for a match
+            for (int i = 0; i < BOARD_SIZE; i++) {
+                if (filter[i] == 1) {
+                    if (board[i] != 1) {
+                        match_red = false;
+                    }
+                    if (board[i] != -1) {
+                        match_yellow = false;
+                    }
+                }
+            }
+
+            if (match_red) {
+                result = RED_WIN;
+                break;
+            }
+            if (match_yellow) {
+                result = YELLOW_WIN;
+                break;
+            }
+        }
+
+        results[idx] = result;
+    }
+}
+
+        """)
+
+        # Copy solution filters to constant memory
+        solution_filters_const, _ = mod.get_global('solution_filters_const')
+        drv.memcpy_htod(solution_filters_const, solution_filters.flatten().astype(np.int32))
+
+        # Allocate memory for results
+        results_array = np.zeros(num_sequences, dtype=np.int32)
 
         # Copy data to GPU
-        boards_gpu = drv.mem_alloc(boards_array.nbytes)
-        drv.memcpy_htod(boards_gpu, boards_array)
-
-        filters_gpu = drv.mem_alloc(self.solution_filters.nbytes)
-        drv.memcpy_htod(filters_gpu, self.solution_filters)
-
-        results_gpu = drv.mem_alloc(results_array.nbytes)
-
         valid_moves_gpu = drv.mem_alloc(valid_moves_array.nbytes)
         drv.memcpy_htod(valid_moves_gpu, valid_moves_array)
 
-        M_powers_array = np.array(M_powers, dtype=np.int32)
-        M_powers_gpu = drv.mem_alloc(M_powers_array.nbytes)
-        drv.memcpy_htod(M_powers_gpu, M_powers_array)
+        boards_initial_gpu = drv.mem_alloc(boards_initial.nbytes)
+        drv.memcpy_htod(boards_initial_gpu, boards_initial)
 
-        # Define the GPU kernel
-        mod = SourceModule("""
-        __device__ int int_pow(int base, int exp) {
-            int result = 1;
-            for (int i = 0; i < exp; i++) {
-                result *= base;
-            }
-            return result;
-        }
+        results_gpu = drv.mem_alloc(results_array.nbytes)
 
-        __device__ int apply_moves(int *board, int num_moves,
-                                   int depth, int cols, int *valid_moves, int num_valid_moves,
-                                   int starting_color, int *M_powers) {
-            int color = starting_color;
-            int temp_num_moves = num_moves;
-
-            for (int d = 0; d < depth; d++) {
-                int move_idx = temp_num_moves / M_powers[d];
-                temp_num_moves = temp_num_moves % M_powers[d];
-
-                if (move_idx >= num_valid_moves) {
-                    return 0;  // Invalid move index
-                }
-
-                int col = valid_moves[move_idx];
-
-                // Find the lowest empty row in column
-                int row = -1;
-                for (int r = 5; r >= 0; r--) {
-                    if (board[r * cols + col] == 0) {
-                        row = r;
-                        break;
-                    }
-                }
-                if (row == -1) {
-                    return 0;  // Column is full
-                }
-
-                board[row * cols + col] = color;
-                color *= -1;  // Switch player
-            }
-            return 1;  // Valid move sequence
-        }
-
-        __global__ void evaluate_positions(int *boards, int *filters, int *results,
-                                           int num_boards, int num_filters, int board_size,
-                                           int depth, int *valid_moves, int num_valid_moves,
-                                           int starting_color, int cols, int *M_powers) {
-            int idx = blockIdx.x * blockDim.x + threadIdx.x;
-            if (idx >= num_boards) return;
-
-            int *board = &boards[idx * board_size];
-            int num_moves = idx;
-
-            // Apply moves
-            int valid = apply_moves(board, num_moves, depth, cols, valid_moves, num_valid_moves, starting_color, M_powers);
-            if (!valid) {
-                results[idx] = 0;  // Invalid sequence
-                return;
-            }
-
-            int result = 0;  // 0: undecided, 1: red win, -1: yellow win
-
-            // Evaluate board
-            for (int f = 0; f < num_filters; f++) {
-                int *filter = &filters[f * board_size];
-                int match_red = 1;
-                int match_yellow = 1;
-
-                for (int i = 0; i < board_size; i++) {
-                    if (filter[i] == 1) {
-                        if (board[i] != 1) {
-                            match_red = 0;
-                        }
-                        if (board[i] != -1) {
-                            match_yellow = 0;
-                        }
-                    }
-                }
-
-                if (match_red) {
-                    result = 1;
-                    break;
-                }
-                if (match_yellow) {
-                    result = -1;
-                    break;
-                }
-            }
-
-            results[idx] = result;
-        }
-        """)
-
-        func = mod.get_function("evaluate_positions")
-
+        func = mod.get_function("simulate_and_evaluate")
         block_size = 256
-        grid_size = (num_boards + block_size - 1) // block_size
+        grid_size = (num_sequences + block_size - 1) // block_size
 
         func(
-            boards_gpu,
-            filters_gpu,
-            results_gpu,
-            np.int32(num_boards),
-            np.int32(self.solution_filters.shape[0]),
-            np.int32(self.rows * self.cols),
-            np.int32(depth),
             valid_moves_gpu,
-            np.int32(len(valid_moves)),
-            np.int32(color),
-            np.int32(self.cols),
-            M_powers_gpu,
+            np.int32(num_valid_moves),
+            np.int32(depth),
+            results_gpu,
+            boards_initial_gpu,
+            np.uint64(num_sequences),
             block=(block_size, 1, 1),
             grid=(grid_size, 1)
         )
@@ -291,15 +286,16 @@ class Connect4:
 
         # Aggregate results based on the initial move
         move_results = {}
-        for idx in range(num_boards):
+        for idx in range(num_sequences):
             result = results_array[idx]
-            num_moves = idx
-            if result == 0:
+            if result == -2:
                 continue  # Skip invalid sequences
 
-            # Calculate initial move index
-            temp_num_moves = num_moves
-            initial_move_idx = temp_num_moves // M_powers[0]
+            temp_idx = idx
+            initial_move_idx = 0
+            for d in range(depth):
+                initial_move_idx = temp_idx % num_valid_moves
+                temp_idx //= num_valid_moves
 
             initial_move = valid_moves[initial_move_idx]
 
