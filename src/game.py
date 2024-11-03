@@ -5,7 +5,7 @@ import numpy as np
 from connect4 import Connect4
 
 class Connect4Game:
-    def __init__(self, depth=4):
+    def __init__(self, depth=2):
         self.game = Connect4()
         self.depth = depth
         self.column_letters = string.ascii_uppercase[:self.game.cols]
@@ -18,12 +18,12 @@ class Connect4Game:
 
     def prompt_recursion_depth(self, stdscr):
         stdscr.clear()
-        stdscr.addstr("Enter recursion depth (default is 4): ")
+        stdscr.addstr("Enter recursion depth (default is 2): ")
         stdscr.refresh()
         curses.echo()
         depth_input = stdscr.getstr().decode("utf-8").strip()
         curses.noecho()
-        self.depth = int(depth_input) if depth_input.isdigit() else 4
+        self.depth = int(depth_input) if depth_input.isdigit() else 2
 
     def display_board(self, stdscr):
         stdscr.clear()
@@ -33,9 +33,9 @@ class Connect4Game:
             for col in range(self.game.cols):
                 cell = self.game.board[row, col]
                 if cell == 1:
-                    stdscr.addstr("0", curses.color_pair(1))
+                    stdscr.addstr("O", curses.color_pair(1))
                 elif cell == -1:
-                    stdscr.addstr("0", curses.color_pair(2))
+                    stdscr.addstr("O", curses.color_pair(2))
                 else:
                     stdscr.addstr(" ")
                 stdscr.addstr("|")
@@ -59,10 +59,10 @@ class Connect4Game:
 
             percentages = stats['percentages']
             stdscr.addstr(f"{col_letter}: Column {col} - ")
-            stdscr.addstr(f"Red Win: {percentages['red_win']:.1f}%, ")
-            stdscr.addstr(f"Yellow Win: {percentages['yellow_win']:.1f}%, ")
-            stdscr.addstr(f"Tie: {percentages['tie']:.1f}%, ")
-            stdscr.addstr(f"Undecided: {percentages['undecided']:.1f}%\n")
+            stdscr.addstr(f"Red Win: {percentages.get('red_win', 0):.1f}%, ")
+            stdscr.addstr(f"Yellow Win: {percentages.get('yellow_win', 0):.1f}%, ")
+            stdscr.addstr(f"Tie: {percentages.get('tie', 0):.1f}%, ")
+            stdscr.addstr(f"Undecided: {percentages.get('undecided', 0):.1f}%\n")
 
         stdscr.refresh()
         return move_options, execution_time
@@ -85,19 +85,19 @@ class Connect4Game:
                 for c in range(self.game.cols):
                     cell = new_board[r, c]
                     if cell == 1:
-                        stdscr.addstr("0", curses.color_pair(1))
+                        stdscr.addstr("O", curses.color_pair(1))
                     elif cell == -1:
-                        stdscr.addstr("0", curses.color_pair(2))
+                        stdscr.addstr("O", curses.color_pair(2))
                     else:
                         stdscr.addstr(" ")
                     stdscr.addstr("|")
                 stdscr.addstr("\n")
             stdscr.addstr(" " + " ".join(self.column_letters) + "\n")
             stdscr.addstr(f"\nMove: {col_letter} - Column {col}\n")
-            stdscr.addstr(f"Red Win: {percentages['red_win']:.1f}%\n")
-            stdscr.addstr(f"Yellow Win: {percentages['yellow_win']:.1f}%\n")
-            stdscr.addstr(f"Tie: {percentages['tie']:.1f}%\n")
-            stdscr.addstr(f"Undecided: {percentages['undecided']:.1f}%\n")
+            stdscr.addstr(f"Red Win: {percentages.get('red_win', 0):.1f}%\n")
+            stdscr.addstr(f"Yellow Win: {percentages.get('yellow_win', 0):.1f}%\n")
+            stdscr.addstr(f"Tie: {percentages.get('tie', 0):.1f}%\n")
+            stdscr.addstr(f"Undecided: {percentages.get('undecided', 0):.1f}%\n")
             stdscr.addstr("\nUse LEFT/RIGHT arrow keys to navigate and press ENTER to select.\n")
             stdscr.refresh()
 

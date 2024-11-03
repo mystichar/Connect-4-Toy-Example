@@ -1,11 +1,10 @@
-# Dockerfile
-
 # Use an official NVIDIA CUDA image with a specific CUDA version
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
 # Set environment variables for CUDA
 ENV CUDA_VERSION=11.8
 ENV CUDNN_VERSION=8
+ENV PATH="/usr/local/cuda/bin:${PATH}"
 
 # Update and install dependencies
 RUN apt-get update && \
@@ -14,6 +13,8 @@ RUN apt-get update && \
     latexmk \
     sudo \
     python3-pip \
+    g++ \
+    build-essential \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -30,6 +31,13 @@ RUN pip3 install --no-cache-dir pytest \
     pydantic \
     numpy \
     scipy
+
+#RUN apt get install nvcc
+
+# Install pycuda
+RUN apt-get update
+RUN apt-get install python3.10-dev
+RUN pip3 install --no-cache-dir pycuda
 
 # Define the working directory inside the container
 WORKDIR /workspace/src

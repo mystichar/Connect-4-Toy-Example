@@ -1,12 +1,56 @@
 import numpy as np
-from scipy.signal import convolve2d
+import pycuda.autoinit
+import pycuda.driver as drv
+from pycuda.compiler import SourceModule
 
 class Connect4:
     def __init__(self):
-        # Initialize a 6-row by 7-column board using NumPy arrays
+        # Initialize board dimensions
         self.rows = 6
         self.cols = 7
         self.board = np.zeros((self.rows, self.cols), dtype=int)
+
+        # Precompute the solution filters
+        self.solution_filters = self.generate_solution_filters()
+
+    def generate_solution_filters(self):
+        """
+        Generate the solution filters for horizontal, vertical, and diagonal wins.
+        Each filter is a bitmask that represents a winning position.
+        """
+        filters = []
+
+        # Horizontal filters
+        for row in range(self.rows):
+            for col in range(self.cols - 3):
+                mask = np.zeros((self.rows, self.cols), dtype=int)
+                mask[row, col:col+4] = 1
+                filters.append(mask.flatten())
+
+        # Vertical filters
+        for row in range(self.rows - 3):
+            for col in range(self.cols):
+                mask = np.zeros((self.rows, self.cols), dtype=int)
+                mask[row:row+4, col] = 1
+                filters.append(mask.flatten())
+
+        # Positive diagonal filters
+        for row in range(self.rows - 3):
+            for col in range(self.cols - 3):
+                mask = np.zeros((self.rows, self.cols), dtype=int)
+                for i in range(4):
+                    mask[row + i, col + i] = 1
+                filters.append(mask.flatten())
+
+        # Negative diagonal filters
+        for row in range(3, self.rows):
+            for col in range(self.cols - 3):
+                mask = np.zeros((self.rows, self.cols), dtype=int)
+                for i in range(4):
+                    mask[row - i, col + i] = 1
+                filters.append(mask.flatten())
+
+        return np.array(filters, dtype=np.int32)
 
     def get_board_state(self):
         return self.board
@@ -30,22 +74,26 @@ class Connect4:
                 return row, col  # Return the position where the piece was placed
         return None  # The column is full; should not happen if checked before
 
+    def is_full(self, board=None):
+        board = self.board if board is None else board
+        # The board is full if there are no empty cells in the top row
+        return np.all(board[0, :] != 0)
+
     def check_winner(self, board, color, row, col):
         """
         Checks if the last move at (row, col) created a winning sequence for the given color.
-        Only checks in the vicinity of the last move to optimize performance.
         """
         directions = [
-            (0, 1),   # Horizontal (left-right)
-            (1, 0),   # Vertical (up-down)
-            (1, 1),   # Diagonal (top-left to bottom-right)
-            (1, -1)   # Diagonal (top-right to bottom-left)
+            (0, 1),   # Horizontal
+            (1, 0),   # Vertical
+            (1, 1),   # Positive diagonal
+            (1, -1)   # Negative diagonal
         ]
-        
+
         for dr, dc in directions:
             count = 1  # Start with the last move itself
 
-            # Check in the positive direction for this vector
+            # Check in the positive direction
             r, c = row + dr, col + dc
             while 0 <= r < self.rows and 0 <= c < self.cols and board[r, c] == color:
                 count += 1
@@ -54,7 +102,7 @@ class Connect4:
                 r += dr
                 c += dc
 
-            # Check in the negative direction for this vector
+            # Check in the negative direction
             r, c = row - dr, col - dc
             while 0 <= r < self.rows and 0 <= c < self.cols and board[r, c] == color:
                 count += 1
@@ -65,18 +113,9 @@ class Connect4:
 
         return False
 
-    def is_full(self, board=None):
-        board = self.board if board is None else board
-        # The board is full if there are no empty cells in the top row
-        return np.all(board[0, :] != 0)
-
     def get_game_result(self, board, color, row, col):
         """
         Check for a game result after the last move.
-        :param board: 2D numpy array representing the game board.
-        :param color: Integer representing the player's color (1 for Red, -1 for Yellow).
-        :param row: Integer row index of the last move.
-        :param col: Integer column index of the last move.
         """
         if self.check_winner(board, color, row, col):
             return "red_win" if color == 1 else "yellow_win"
@@ -85,80 +124,157 @@ class Connect4:
         else:
             return "undecided"
 
-    def evaluate_result(self, result):
-        # Assign numerical scores to game outcomes for the minimax algorithm
-        if result == "red_win":
-            return 1
-        elif result == "yellow_win":
-            return -1
-        else:  # "tie" or "undecided"
-            return 0
-
-    def simulate_move_tree_statistics(self, board, depth, current_color, last_move=None):
+    def evaluate_move_statistics(self, depth=2):
         """
-        Simulate moves recursively to gather statistics.
-        :param board: 2D numpy array representing the game board.
-        :param depth: The depth to explore moves.
-        :param current_color: Integer representing the current player's color.
-        :param last_move: Tuple (row, col) representing the last move played.
-        :return: A dictionary with win, loss, tie, and undecided counts.
-        """
-        if last_move is not None:
-            row, col = last_move
-            result = self.get_game_result(board, -current_color, row, col)
-        else:
-            result = "undecided"
-
-        if result != "undecided" or depth == 0:
-            return {result: 1}
-        
-        board_tuple = tuple(map(tuple, board))
-        key = (board_tuple, current_color, depth)
-        if key in self.memo:
-            return self.memo[key]
-        
-        valid_moves = self.get_valid_moves(board)
-        if not valid_moves:
-            return {"tie": 1}
-        
-        results = {"red_win": 0, "yellow_win": 0, "tie": 0, "undecided": 0}
-        for col in valid_moves:
-            new_board = board.copy()
-            row, col_pos = self.apply_move(new_board, col, current_color)
-            immediate_result = self.get_game_result(new_board, current_color, row, col_pos)
-            if immediate_result != "undecided":
-                outcome = {immediate_result: 1}
-            else:
-                outcome = self.simulate_move_tree_statistics(new_board, depth - 1, -current_color, (row, col_pos))
-            
-            # Aggregate results
-            for key in results:
-                results[key] += outcome.get(key, 0)
-        
-        self.memo[key] = results
-        return results
-
-    def evaluate_move_statistics(self, depth=4):
-        """
-        Evaluate the statistics for each possible move.
-        :param depth: int - The depth to explore moves.
-        :return: dict - Statistics for each move column.
+        Evaluate the statistics for each possible move using GPU acceleration.
         """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves()
         move_statistics = {}
-        self.memo = {}  # Reset memoization cache
 
+        # Prepare data for GPU
+        boards_to_evaluate = []
+        colors_to_evaluate = []
+        moves_sequence = []
+
+        # Initial moves
         for col in valid_moves:
             new_board = self.board.copy()
             row, col_pos = self.apply_move(new_board, col, color)
-            stats = self.simulate_move_tree_statistics(new_board, depth - 1, -color, (row, col_pos))
-            total = sum(stats.values())
-            percentages = {key: (stats.get(key, 0) / total) * 100 if total > 0 else 0
-                           for key in ['red_win', 'yellow_win', 'tie', 'undecided']}
-            move_statistics[col] = {
-                'percentages': percentages,
+            boards_to_evaluate.append(new_board.flatten())
+            colors_to_evaluate.append(-color)
+            moves_sequence.append([col])
+            # Store the last move positions for result checking
+            last_moves = [(row, col_pos)]
+
+        # Perform recursive move generation up to the specified depth
+        for d in range(1, depth):
+            new_boards = []
+            new_colors = []
+            new_moves_sequence = []
+            new_last_moves = []
+            for idx, board_flat in enumerate(boards_to_evaluate):
+                board = board_flat.reshape((self.rows, self.cols))
+                current_color = colors_to_evaluate[idx]
+                sequence = moves_sequence[idx]
+                valid_moves = self.get_valid_moves(board)
+
+                for col in valid_moves:
+                    next_board = board.copy()
+                    row, col_pos = self.apply_move(next_board, col, current_color)
+                    new_boards.append(next_board.flatten())
+                    new_colors.append(-current_color)
+                    new_moves_sequence.append(sequence + [col])
+                    new_last_moves.append((row, col_pos))
+
+            boards_to_evaluate = new_boards
+            colors_to_evaluate = new_colors
+            moves_sequence = new_moves_sequence
+            last_moves = new_last_moves
+
+        if not boards_to_evaluate:
+            return move_statistics  # No moves to evaluate
+
+        num_boards = len(boards_to_evaluate)
+        boards_array = np.array(boards_to_evaluate, dtype=np.int32)
+        colors_array = np.array(colors_to_evaluate, dtype=np.int32)
+
+        # Prepare solution filters
+        solution_filters = self.solution_filters
+        num_filters = solution_filters.shape[0]
+
+        # Allocate GPU memory
+        results_array = np.zeros(num_boards, dtype=np.int32)
+
+        # Copy data to GPU
+        boards_gpu = drv.mem_alloc(boards_array.nbytes)
+        drv.memcpy_htod(boards_gpu, boards_array)
+
+        filters_gpu = drv.mem_alloc(solution_filters.nbytes)
+        drv.memcpy_htod(filters_gpu, solution_filters)
+
+        results_gpu = drv.mem_alloc(results_array.nbytes)
+
+        # Define the GPU kernel
+        mod = SourceModule("""
+    __global__ void evaluate_positions(int *boards, int *filters, int *results,
+                                       int num_boards, int num_filters, int board_size) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= num_boards) return;
+
+        int *board = &boards[idx * board_size];
+        int result = 0;  // 0: undecided, 1: red win, -1: yellow win
+
+        for (int f = 0; f < num_filters; f++) {
+            int *filter = &filters[f * board_size];
+            int match_red = 1;
+            int match_yellow = 1;
+
+            for (int i = 0; i < board_size; i++) {
+                if (filter[i] == 1) {
+                    if (board[i] != 1) {
+                        match_red = 0;
+                    }
+                    if (board[i] != -1) {
+                        match_yellow = 0;
+                    }
+                }
             }
+
+            if (match_red) {
+                result = 1;
+                break;
+            }
+            if (match_yellow) {
+                result = -1;
+                break;
+            }
+        }
+
+        results[idx] = result;
+    }
+    """)
+
+        func = mod.get_function("evaluate_positions")
+        block_size = 256
+        grid_size = (num_boards + block_size - 1) // block_size
+
+        func(
+            boards_gpu,
+            filters_gpu,
+            results_gpu,
+            np.int32(num_boards),
+            np.int32(num_filters),
+            np.int32(self.rows * self.cols),
+            block=(block_size, 1, 1),
+            grid=(grid_size, 1)
+        )
+
+        # Retrieve results from GPU
+        drv.memcpy_dtoh(results_array, results_gpu)
+
+        # Aggregate results based on the initial move
+        move_results = {}
+        for idx, sequence in enumerate(moves_sequence):
+            initial_move = sequence[0]
+            result = results_array[idx]
+            if initial_move not in move_results:
+                move_results[initial_move] = {'red_win': 0, 'yellow_win': 0, 'undecided': 0}
+
+            if result == 1:
+                move_results[initial_move]['red_win'] += 1
+            elif result == -1:
+                move_results[initial_move]['yellow_win'] += 1
+            else:
+                move_results[initial_move]['undecided'] += 1
+
+        # Calculate percentages
+        for col, stats in move_results.items():
+            total = sum(stats.values())
+            percentages = {key: (value / total) * 100 if total > 0 else 0 for key, value in stats.items()}
+            # Add tie percentage as 0 since we don't calculate ties here
+            percentages['tie'] = 0.0
+            move_statistics[col] = {'percentages': percentages}
 
         return move_statistics
 
