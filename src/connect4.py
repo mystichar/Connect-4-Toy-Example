@@ -2,6 +2,7 @@ import numpy as np
 import pycuda.autoinit
 import pycuda.driver as drv
 from pycuda.compiler import SourceModule
+from multiprocessing import Pool, cpu_count
 
 class Connect4:
     def __init__(self):
@@ -124,54 +125,70 @@ class Connect4:
         else:
             return "undecided"
 
+    def generate_states_recursive(self, state, depth):
+        """
+        Recursively generate board states using multiprocessing.
+        """
+        board, colors, sequence, last_moves = state
+        if depth == 0:
+            return ([board.flatten()], colors, [sequence])
+
+        boards = []
+        colors_list = []
+        sequences = []
+
+        valid_moves = self.get_valid_moves(board)
+        current_color = colors[-1]
+        for col in valid_moves:
+            next_board = board.copy()
+            row, col_pos = self.apply_move(next_board, col, current_color)
+            next_colors = colors + [-current_color]
+            next_sequence = sequence + [col]
+            next_last_moves = last_moves + [(row, col_pos)]
+
+            child_state = (next_board, next_colors, next_sequence, next_last_moves)
+            child_boards, child_colors, child_sequences = self.generate_states_recursive(child_state, depth - 1)
+
+            boards.extend(child_boards)
+            colors_list.extend(child_colors)
+            sequences.extend(child_sequences)
+
+        return (boards, colors_list, sequences)
+
     def evaluate_move_statistics(self, depth=2):
         """
-        Evaluate the statistics for each possible move using GPU acceleration.
+        Evaluate the statistics for each possible move using GPU acceleration and multiprocessing.
         """
         color = self.check_move_color()
         valid_moves = self.get_valid_moves()
         move_statistics = {}
 
-        # Prepare data for GPU
+        # Prepare data for initial moves
+        initial_states = []
+        for col in valid_moves:
+            new_board = self.board.copy()
+            row, col_pos = self.apply_move(new_board, col, color)
+            initial_states.append((new_board, [-color], [col], [(row, col_pos)]))
+
+        # Use multiprocessing to generate board states recursively
+        with Pool(processes=cpu_count()) as pool:
+            results = pool.starmap(
+                self.generate_states_recursive,
+                [(state, depth - 1) for state in initial_states]
+            )
+
+        # Flatten the results
         boards_to_evaluate = []
         colors_to_evaluate = []
         moves_sequence = []
 
-        # Initial moves
-        for col in valid_moves:
-            new_board = self.board.copy()
-            row, col_pos = self.apply_move(new_board, col, color)
-            boards_to_evaluate.append(new_board.flatten())
-            colors_to_evaluate.append(-color)
-            moves_sequence.append([col])
-            # Store the last move positions for result checking
-            last_moves = [(row, col_pos)]
+        for result in results:
+            boards, colors, sequences = result
+            boards_to_evaluate.extend(boards)
+            colors_to_evaluate.extend(colors)
+            moves_sequence.extend(sequences)
 
-        # Perform recursive move generation up to the specified depth
-        for d in range(1, depth):
-            new_boards = []
-            new_colors = []
-            new_moves_sequence = []
-            new_last_moves = []
-            for idx, board_flat in enumerate(boards_to_evaluate):
-                board = board_flat.reshape((self.rows, self.cols))
-                current_color = colors_to_evaluate[idx]
-                sequence = moves_sequence[idx]
-                valid_moves = self.get_valid_moves(board)
-
-                for col in valid_moves:
-                    next_board = board.copy()
-                    row, col_pos = self.apply_move(next_board, col, current_color)
-                    new_boards.append(next_board.flatten())
-                    new_colors.append(-current_color)
-                    new_moves_sequence.append(sequence + [col])
-                    new_last_moves.append((row, col_pos))
-
-            boards_to_evaluate = new_boards
-            colors_to_evaluate = new_colors
-            moves_sequence = new_moves_sequence
-            last_moves = new_last_moves
-
+        # The rest of the method remains the same
         if not boards_to_evaluate:
             return move_statistics  # No moves to evaluate
 
