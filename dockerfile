@@ -36,8 +36,10 @@ RUN pip3 install --no-cache-dir pytest \
 
 # Install pycuda
 RUN apt-get update
-RUN apt-get install python3.10-dev
-RUN pip3 install --no-cache-dir pycuda
+RUN apt-get install python3.10-dev -y
+RUN pip3 install --no-cache-dir pycuda 
+
+RUN pip3 install --no-cache-dir qadence clifford matplotlib numpy
 
 # Define the working directory inside the container
 WORKDIR /workspace/src
