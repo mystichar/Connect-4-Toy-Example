@@ -1,0 +1,307 @@
+<html><head><base href="." />
+    <title>Quaternion Rotation Visualizer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+        }
+        
+        #container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+        }
+        
+        #controls {
+            position: absolute;
+            right: 20px;
+            top: 20px;
+            background: rgba(0,0,0,0.7);
+            padding: 20px;
+            border-radius: 10px;
+            min-width: 300px;
+            max-width: 90vw;
+            min-height: 200px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+    
+        .coefficient-controls {
+            margin: 15px 0;
+            display: block;
+        }
+    
+        .coefficient-group {
+            margin: 15px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+    
+        .coefficient-group label {
+            width: 20px;
+        }
+    
+        .coefficient-group button {
+            width: 30px;
+            height: 30px;
+            background: #444;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+    
+        .coefficient-group button:hover {
+            background: #555;
+        }
+    
+        .coefficient-value {
+            min-width: 50px;
+            text-align: center;
+        }
+    
+        #quaternionDisplay {
+            margin-top: 20px;
+            padding: 10px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 5px;
+            font-family: monospace;
+        }
+    </style>
+    </head>
+    <body>
+    <div id="container"></div>
+    <div id="controls">
+        <h3>Quaternion Rotation Controls</h3>
+        <rotation-controls 
+            @coefficients-updated="handleCoefficients"
+        />
+        <quaternion-display :quaternion="currentQuaternion" />
+    </div>
+    
+    <script>
+    const RotationControls = {
+      template: `
+        <div id="coefficient-controls">
+          <div class="coefficient-group" v-for="coef in ['w','x','y','z']">
+            <label>{{coef}}:</label>
+            <button @click="updateCoefficient(coef, -0.1)">-</button>
+            <span class="coefficient-value">{{coefficients[coef].toFixed(2)}}</span>
+            <button @click="updateCoefficient(coef, 0.1)">+</button>
+          </div>
+        </div>
+      `,
+      data() {
+        return {
+          coefficients: {
+            w: 1,
+            x: 0,
+            y: 0,
+            z: 0
+          }
+        }
+      },
+      methods: {
+        updateCoefficient(coef, delta) {
+          this.coefficients[coef] += delta
+          this.$emit('coefficients-updated', this.coefficients)
+        }
+      }
+    }
+    
+    const QuaternionDisplay = {
+      template: `
+        <div id="quaternionDisplay">
+          <p>Quaternion:</p>
+          <p>{{display}}</p>
+        </div>
+      `,
+      props: ['quaternion'],
+      computed: {
+        display() {
+          const fraction = findCommonDenominator([
+            this.quaternion.w,
+            this.quaternion.x,
+            this.quaternion.y,
+            this.quaternion.z
+          ])
+          return `${fraction.numerators[0]}/${fraction.denominator} + ` +
+                 `${fraction.numerators[1]}/${fraction.denominator}i + ` +
+                 `${fraction.numerators[2]}/${fraction.denominator}j + ` +
+                 `${fraction.numerators[3]}/${fraction.denominator}k`
+        }
+      }
+    }
+    
+    const app = Vue.createApp({
+      components: {
+        RotationControls,
+        QuaternionDisplay
+      },
+      template: `
+        <div id="controls">
+          <h3>Quaternion Rotation Controls</h3>
+          <rotation-controls 
+            @coefficients-updated="handleCoefficients"
+          />
+          <quaternion-display :quaternion="currentQuaternion" />
+        </div>
+      `,
+      data() {
+        return {
+          currentQuaternion: {
+            w: 1,
+            x: 0,
+            y: 0,
+            z: 0
+          }
+        }
+      },
+      methods: {
+        handleCoefficients(coefficients) {
+          const magnitude = Math.sqrt(
+            coefficients.w * coefficients.w +
+            coefficients.x * coefficients.x +
+            coefficients.y * coefficients.y +
+            coefficients.z * coefficients.z
+          )
+          this.currentQuaternion = {
+            w: coefficients.w / magnitude,
+            x: coefficients.x / magnitude,
+            y: coefficients.y / magnitude,
+            z: coefficients.z / magnitude
+          }
+          const quaternion = new THREE.Quaternion(
+            this.currentQuaternion.x,
+            this.currentQuaternion.y,
+            this.currentQuaternion.z,
+            this.currentQuaternion.w
+          )
+          sphere.setRotationFromQuaternion(quaternion)
+        }
+      }
+    })
+    
+    app.mount('#controls')
+    
+    let scene, camera, renderer, sphere, axesGroup;
+    
+    function gcd(a, b) {
+        a = Math.abs(a);
+        b = Math.abs(b);
+        while (b) {
+            const t = b;
+            b = a % b;
+            a = t;
+        }
+        return a;
+    }
+    
+    function findCommonDenominator(numbers) {
+        const precision = 1000;
+        const fractions = numbers.map(num => {
+            const scaled = Math.round(num * precision);
+            return {
+                numerator: scaled,
+                denominator: precision
+            };
+        });
+        
+        let commonDenominator = fractions[0].denominator;
+        for (let i = 1; i < fractions.length; i++) {
+            commonDenominator = (commonDenominator * fractions[i].denominator) / 
+                gcd(commonDenominator, fractions[i].denominator);
+        }
+        
+        const scaledNumerators = fractions.map(fraction => {
+            const scale = commonDenominator / fraction.denominator;
+            return Math.round(fraction.numerator * scale);
+        });
+        
+        let allNumbers = [...scaledNumerators, commonDenominator];
+        let commonGCD = allNumbers[0];
+        for (let i = 1; i < allNumbers.length; i++) {
+            commonGCD = gcd(commonGCD, allNumbers[i]);
+        }
+        
+        return {
+            numerators: scaledNumerators.map(n => n / commonGCD),
+            denominator: commonDenominator / commonGCD
+        };
+    }
+    
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('container').appendChild(renderer.domElement);
+        
+        camera.position.z = 5;
+        
+        const sphereGeometry = new THREE.SphereGeometry(1, 32, 32);
+        const sphereMaterial = new THREE.MeshPhongMaterial({
+            color: 0x808080,
+            transparent: true,
+            opacity: 0.7
+        });
+        sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+        
+        axesGroup = new THREE.Group();
+        
+        const cylinderGeometry = new THREE.CylinderGeometry(0.05, 0.05, 2);
+        
+        const xAxis = new THREE.Mesh(
+            cylinderGeometry,
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        xAxis.rotation.z = Math.PI / 2;
+        
+        const yAxis = new THREE.Mesh(
+            cylinderGeometry,
+            new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+        );
+        
+        const zAxis = new THREE.Mesh(
+            cylinderGeometry,
+            new THREE.MeshBasicMaterial({ color: 0x0000ff })
+        );
+        zAxis.rotation.x = Math.PI / 2;
+        
+        axesGroup.add(xAxis);
+        axesGroup.add(yAxis);
+        axesGroup.add(zAxis);
+        
+        sphere.add(axesGroup);
+        scene.add(sphere);
+        
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        
+        const pointLight = new THREE.PointLight(0xffffff, 1);
+        pointLight.position.set(5, 5, 5);
+        scene.add(pointLight);
+    }
+    
+    function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+    }
+    
+    window.addEventListener('resize', function() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    
+    init();
+    animate();
+    </script>
+    </body>
+    </html>
