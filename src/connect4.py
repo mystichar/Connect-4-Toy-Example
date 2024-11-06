@@ -3,6 +3,7 @@ import networkx as nx
 import cirq
 import cirq_pasqal
 from cirq_pasqal import PasqalDevice
+import concurrent.futures
 
 class Connect4Quantum:
     def __init__(self):
@@ -15,14 +16,17 @@ class Connect4Quantum:
         self.game_graph = nx.DiGraph()
 
         # Define qubits for quantum simulation (one per board cell)
-        # Using NamedQubit as required by PasqalDevice
         self.qubits = [cirq.NamedQubit(f'q_{row}_{col}') for row in range(self.rows) for col in range(self.cols)]
 
-        # Initialize Pasqal device without 'control_radius'
+        # Initialize Pasqal device
         self.device = PasqalDevice(qubits=self.qubits)
 
         # Initialize Cirq simulator
         self.simulator = cirq.Simulator()
+
+        # Attributes to store operation counts
+        self.total_quantum_operations = 0
+        self.classical_operations = 0
 
     def check_move_color(self, board=None):
         board = self.board if board is None else board
@@ -127,14 +131,58 @@ class Connect4Quantum:
             else:
                 self._build_tree_recursive(new_board, depth - 1, new_state_tuple)
 
-    def evaluate_move_statistics(self, depth=4, batch_size=100):
+    def count_quantum_operations(self, circuit):
+        """
+        Counts the total number of quantum gate operations in a quantum circuit,
+        excluding measurements if desired.
+
+        Args:
+            circuit (cirq.Circuit): The quantum circuit.
+
+        Returns:
+            int: Total number of quantum gate operations in the circuit.
+        """
+        # Count the number of gate operations, excluding measurements if preferred
+        gate_count = 0
+        for op in circuit.all_operations():
+            # Include measurement gates if you consider them significant
+            gate_count += 1
+        return gate_count
+
+
+    def count_classical_operations(self, depth, branching_factor=7):
+        """
+        Estimates the total number of operations in a classical Connect4 evaluation.
+
+        Args:
+            depth (int): Depth of the game tree search.
+            branching_factor (int): Average number of possible moves.
+
+        Returns:
+            int: Estimated total number of operations.
+        """
+        # Assume each node performs one move and one win check
+        operations_per_node = 2  # Adjust if necessary
+        operations = 0
+        for d in range(depth):
+            nodes_at_depth = branching_factor ** d
+            operations += nodes_at_depth * operations_per_node
+        return operations
+
+
+    def evaluate_move_statistics(self, depth=4, batch_size=100, max_workers=1):
         """
         Evaluates move statistics using quantum circuits simulated with Cirq and Pasqal.
 
         Args:
             depth (int): The depth of the game tree to explore.
             batch_size (int): The number of move sequences to process in each batch.
+            max_workers (int): The number of parallel workers to use for simulation.
         """
+        # Reset operation counts
+        self.total_quantum_operations = 0
+        self.classical_operations = self.count_classical_operations(depth)
+
         color = self.check_move_color()
         valid_moves = self.get_valid_moves()
         move_statistics = {}
@@ -154,15 +202,17 @@ class Connect4Quantum:
         total_sequences = len(paths)
         print(f"Total move sequences to evaluate: {total_sequences}")
 
-        # Process move sequences in batches
-        for batch_start in range(0, total_sequences, batch_size):
-            batch_paths = paths[batch_start:batch_start + batch_size]
+        # Helper function to run a batch in parallel and count operations
+        def run_batch(batch_paths):
+            batch_move_stats = {}
             circuits = []
             move_indices = []
             path_end_states = []
+            batch_operations = 0
 
             for path in batch_paths:
                 circuit, initial_move, end_state = self._create_circuit_for_path(path)
+                batch_operations += self.count_quantum_operations(circuit)  # Count operations in this circuit
                 circuits.append(circuit)
                 move_indices.append(initial_move)
                 path_end_states.append(end_state)
@@ -176,9 +226,29 @@ class Connect4Quantum:
                 result = result_list[0]  # Since we have repetitions=1
                 measurements = result.measurements['m']
                 outcome = self._determine_outcome(measurements, path_end_states[i])
-                if move not in move_statistics:
-                    move_statistics[move] = {'red_win': 0, 'yellow_win': 0, 'tie': 0, 'undecided': 0}
-                move_statistics[move][outcome] += 1
+                if move not in batch_move_stats:
+                    batch_move_stats[move] = {'red_win': 0, 'yellow_win': 0, 'tie': 0, 'undecided': 0}
+                batch_move_stats[move][outcome] += 1
+            return batch_move_stats, batch_operations
+
+        # Use ThreadPoolExecutor for parallel execution of batches
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for batch_start in range(0, total_sequences, batch_size):
+                batch_paths = paths[batch_start:batch_start + batch_size]
+                futures.append(executor.submit(run_batch, batch_paths))
+
+            # Combine results from all futures
+            for future in concurrent.futures.as_completed(futures):
+                batch_stats, batch_operations = future.result()
+                self.total_quantum_operations += batch_operations  # Accumulate operations
+                for move, outcomes in batch_stats.items():
+                    if move not in move_statistics:
+                        move_statistics[move] = outcomes
+                    else:
+                        # Aggregate results
+                        for outcome, count in outcomes.items():
+                            move_statistics[move][outcome] += count
 
         # Calculate percentages
         for move in move_statistics:
@@ -187,7 +257,12 @@ class Connect4Quantum:
             percentages = {key: (value / total) * 100 if total > 0 else 0 for key, value in stats.items()}
             move_statistics[move] = {'percentages': percentages}
 
+        # Print comparison results
+        print(f"Quantum operations (simulated): {self.total_quantum_operations}")
+        print(f"Classical operations (estimated): {self.classical_operations}")
+
         return move_statistics
+
 
     def _get_paths_of_length(self, length):
         """

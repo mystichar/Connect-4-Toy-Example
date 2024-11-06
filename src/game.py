@@ -50,6 +50,8 @@ class Connect4Game:
 
         stdscr.addstr("Available moves:\n")
         stdscr.addstr(f"Simulation execution time: {execution_time:.2f} seconds\n")
+        stdscr.addstr("Quantum operations: {}\n".format(self.game.total_quantum_operations))
+        stdscr.addstr("Classical operations: {}\n".format(self.game.classical_operations))
         stdscr.refresh()
 
         move_options = []
@@ -79,6 +81,8 @@ class Connect4Game:
 
             stdscr.clear()
             stdscr.addstr(f"Simulation execution time: {execution_time:.2f} seconds\n")
+            stdscr.addstr("Quantum operations: {}\n".format(self.game.total_quantum_operations))
+            stdscr.addstr("Classical operations: {}\n".format(self.game.classical_operations))
             stdscr.addstr(f"Simulating move: {col_letter} - Column {col}\n")
             for r in range(self.game.rows):
                 stdscr.addstr("|")
