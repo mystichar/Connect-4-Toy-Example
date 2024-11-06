@@ -2,7 +2,7 @@ import string
 import curses
 import time
 import numpy as np
-from connect4 import Connect4
+from connect4 import Connect4Quantum as Connect4
 
 class Connect4Game:
     def __init__(self, depth=2):

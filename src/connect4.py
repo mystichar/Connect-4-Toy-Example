@@ -1,347 +1,39 @@
 import numpy as np
-import pycuda.autoinit
-import pycuda.driver as drv
-from pycuda.compiler import SourceModule
+import networkx as nx
+import cirq
+import cirq_pasqal
+from cirq_pasqal import PasqalDevice
 
-class Connect4:
+class Connect4Quantum:
     def __init__(self):
         # Initialize board dimensions
         self.rows = 6
         self.cols = 7
         self.board = np.zeros((self.rows, self.cols), dtype=int)
 
-        # Generate solution filters as bitboards
-        self.solution_filters = self.generate_solution_filters_bitboards()
+        # Initialize the game graph
+        self.game_graph = nx.DiGraph()
 
-        # Compile the CUDA kernel code and store the module and function
-        self.mod = SourceModule("""
-        // Define constants
-        #define MAX_DEPTH 16      // Adjust as needed
-        #define BOARD_SIZE 42
-        #define NUM_FILTERS 69
-        #define ROWS 6
-        #define COLS 7
-        #define INVALID_SEQUENCE -2
-        #define RED_WIN 1
-        #define YELLOW_WIN -1
-        #define UNDECIDED 0
-        #define SEQUENCES_PER_THREAD 64  // Increased to process more sequences per thread
+        # Define qubits for quantum simulation (one per board cell)
+        # Using NamedQubit as required by PasqalDevice
+        self.qubits = [cirq.NamedQubit(f'q_{row}_{col}') for row in range(self.rows) for col in range(self.cols)]
 
-        // Declare solution filters in constant memory (using bitboards)
-        __constant__ unsigned long long solution_filters_const[NUM_FILTERS];
+        # Initialize Pasqal device without 'control_radius'
+        self.device = PasqalDevice(qubits=self.qubits)
 
-        extern "C" __global__ void simulate_and_evaluate(
-            const int *valid_moves,        // Array of valid moves (columns)
-            const int num_valid_moves,     // Number of valid moves
-            const int depth,               // Search depth
-            int *results,                  // Output array for results (size: num_sequences in batch)
-            const unsigned long long initial_red_board,    // Initial red bitboard
-            const unsigned long long initial_yellow_board, // Initial yellow bitboard
-            const unsigned long long batch_start_idx,      // Starting index for this batch
-            const unsigned long long num_sequences         // Number of sequences in this batch
-        ) {
-            unsigned long long thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-            unsigned long long total_threads = gridDim.x * blockDim.x;
+        # Initialize Cirq simulator
+        self.simulator = cirq.Simulator()
 
-            // Each thread simulates multiple sequences to increase GPU utilization
-            for (unsigned long long idx = thread_id * SEQUENCES_PER_THREAD; idx < num_sequences; idx += total_threads * SEQUENCES_PER_THREAD) {
-                for (int seq_offset = 0; seq_offset < SEQUENCES_PER_THREAD; seq_offset++) {
-                    unsigned long long idx_in_batch = idx + seq_offset;
-                    if (idx_in_batch >= num_sequences) break;
-                    unsigned long long sequence_idx = batch_start_idx + idx_in_batch;
-
-                    // Initialize the bitboards with the initial state
-                    unsigned long long red_board = initial_red_board;
-                    unsigned long long yellow_board = initial_yellow_board;
-
-                    // Generate the move sequence based on sequence_idx
-                    int sequence[MAX_DEPTH];
-                    unsigned long long temp_idx = sequence_idx;
-                    for (int d = depth - 1; d >= 0; d--) {
-                        sequence[d] = valid_moves[temp_idx % num_valid_moves];
-                        temp_idx /= num_valid_moves;
-                    }
-
-                    // Simulate the move sequence
-                    int current_color = 1;  // Starting color (1 for Red)
-                    bool valid_sequence = true;
-                    int heights[COLS];      // Keep track of the current height in each column
-
-                    // Initialize column heights based on initial boards
-                    for (int col = 0; col < COLS; col++) {
-                        heights[col] = 0;
-                        for (int row = 0; row < ROWS; row++) {
-                            int idx_board = row * COLS + col;
-                            unsigned long long mask = 1ULL << idx_board;
-                            if ((red_board & mask) || (yellow_board & mask)) {
-                                heights[col]++;
-                            }
-                        }
-                    }
-
-                    for (int d = 0; d < depth; d++) {
-                        int col = sequence[d];
-                        if (heights[col] >= ROWS) {
-                            // Column is full; invalid sequence
-                            valid_sequence = false;
-                            break;
-                        }
-
-                        int row = ROWS - heights[col] - 1;
-                        int idx_board = row * COLS + col;
-                        unsigned long long move_bit = 1ULL << idx_board;
-
-                        if (current_color == 1) {
-                            red_board |= move_bit;
-                        } else {
-                            yellow_board |= move_bit;
-                        }
-
-                        heights[col]++;  // Increase the height of the column
-
-                        // Switch player
-                        current_color = -current_color;
-                    }
-
-                    if (!valid_sequence) {
-                        results[idx_in_batch] = INVALID_SEQUENCE;
-                        continue;
-                    }
-
-                    // Evaluate the board state for a win using bitboards
-                    int result = UNDECIDED;
-
-                    for (int f = 0; f < NUM_FILTERS; f++) {
-                        unsigned long long filter = solution_filters_const[f];
-                        if ((red_board & filter) == filter) {
-                            result = RED_WIN;
-                            break;
-                        }
-                        if ((yellow_board & filter) == filter) {
-                            result = YELLOW_WIN;
-                            break;
-                        }
-                    }
-
-                    results[idx_in_batch] = result;
-                }
-            }
-        }
-        """)
-
-        # Copy solution filters to constant memory on the GPU once
-        self.solution_filters_const, _ = self.mod.get_global('solution_filters_const')
-        drv.memcpy_htod(self.solution_filters_const, self.solution_filters)
-
-        # Store the function for reuse
-        self.func = self.mod.get_function("simulate_and_evaluate")
-
-        # Initialize variables to keep track of previous valid moves and board state
-        self.valid_moves_array_prev = None
-        self.valid_moves_gpu = None
-        self.boards_initial_prev = None
-        self.boards_initial_gpu = None
-
-        # Initialize CUDA stream for asynchronous execution
-        self.stream = drv.Stream()
-
-    def generate_solution_filters_bitboards(self):
-        """
-        Generate the solution filters for horizontal, vertical, and diagonal wins.
-        Each filter is a bitmask that represents a winning position, stored as an unsigned long long.
-        """
-        filters = []
-
-        # Horizontal filters
-        for row in range(self.rows):
-            for col in range(self.cols - 3):
-                mask = 0
-                for i in range(4):
-                    idx = row * self.cols + col + i
-                    mask |= (1 << idx)
-                filters.append(mask)
-
-        # Vertical filters
-        for row in range(self.rows - 3):
-            for col in range(self.cols):
-                mask = 0
-                for i in range(4):
-                    idx = (row + i) * self.cols + col
-                    mask |= (1 << idx)
-                filters.append(mask)
-
-        # Positive diagonal filters
-        for row in range(self.rows - 3):
-            for col in range(self.cols - 3):
-                mask = 0
-                for i in range(4):
-                    idx = (row + i) * self.cols + (col + i)
-                    mask |= (1 << idx)
-                filters.append(mask)
-
-        # Negative diagonal filters
-        for row in range(3, self.rows):
-            for col in range(self.cols - 3):
-                mask = 0
-                for i in range(4):
-                    idx = (row - i) * self.cols + (col + i)
-                    mask |= (1 << idx)
-                filters.append(mask)
-
-        return np.array(filters, dtype=np.uint64)
-
-    def board_to_bitboards(self):
-        """
-        Convert the current board state into bitboards for red and yellow.
-        """
-        red_board = np.uint64(0)
-        yellow_board = np.uint64(0)
-        flat_board = self.board.flatten()
-        for i in range(flat_board.size):
-            if flat_board[i] == 1:
-                red_board |= np.uint64(1) << np.uint64(i)
-            elif flat_board[i] == -1:
-                yellow_board |= np.uint64(1) << np.uint64(i)
-        return red_board, yellow_board
-
-    def check_move_color(self):
-        """
-        Determine the color of the next move based on the piece count.
-        Returns 1 if even (Red), -1 if odd (Yellow).
-        """
-        piece_count = np.count_nonzero(self.board)
-        return 1 if piece_count % 2 == 0 else -1
-
-    def get_valid_moves(self):
-        """
-        Get a list of valid moves (columns) where the top cell is empty.
-        """
-        return [col for col in range(self.cols) if self.board[0, col] == 0]
-
-    def evaluate_move_statistics(self, depth=4):
-        color = self.check_move_color()
-        valid_moves = self.get_valid_moves()
-        move_statistics = {}
-
-        num_valid_moves = len(valid_moves)
-        num_sequences = num_valid_moves ** depth
-
-        if num_sequences == 0:
-            return move_statistics  # No moves to evaluate
-
-        # Prepare data for GPU
-        valid_moves_array = np.array(valid_moves, dtype=np.int32)
-
-        # Copy data to GPU only if necessary
-        if self.valid_moves_gpu is None or not np.array_equal(self.valid_moves_array_prev, valid_moves_array):
-            if self.valid_moves_gpu is not None:
-                self.valid_moves_gpu.free()
-            self.valid_moves_gpu = drv.mem_alloc(valid_moves_array.nbytes)
-            drv.memcpy_htod(self.valid_moves_gpu, valid_moves_array)
-            self.valid_moves_array_prev = valid_moves_array.copy()
-
-        # Get the initial bitboards
-        red_board, yellow_board = self.board_to_bitboards()
-
-        func = self.func  # Use precompiled function
-
-        # Batch processing
-        max_sequences_per_batch = 10**7  # Adjust based on your GPU's memory capacity
-        total_batches = (num_sequences + max_sequences_per_batch - 1) // max_sequences_per_batch
-
-        block_size = 512  # Adjust as needed
-        SEQUENCES_PER_THREAD = 64  # Must match the value in the kernel
-
-        # Initialize the overall results array
-        results_array = np.zeros(num_sequences, dtype=np.int32)
-
-        for batch_idx in range(total_batches):
-            batch_start = batch_idx * max_sequences_per_batch
-            batch_end = min(num_sequences, (batch_idx + 1) * max_sequences_per_batch)
-            batch_size = batch_end - batch_start
-
-            # Allocate per-batch results array using pinned memory
-            batch_results_array = drv.pagelocked_empty(batch_size, dtype=np.int32)
-            results_gpu = drv.mem_alloc(batch_results_array.nbytes)
-
-            num_threads = (batch_size + SEQUENCES_PER_THREAD - 1) // SEQUENCES_PER_THREAD
-            grid_size = (num_threads + block_size - 1) // block_size
-
-            # Launch the kernel for this batch asynchronously
-            func(
-                self.valid_moves_gpu,
-                np.int32(num_valid_moves),
-                np.int32(depth),
-                results_gpu,
-                np.uint64(red_board),
-                np.uint64(yellow_board),
-                np.uint64(batch_start),    # batch_start_idx
-                np.uint64(batch_size),     # num_sequences in this batch
-                block=(block_size, 1, 1),
-                grid=(grid_size, 1),
-                stream=self.stream              # Use the CUDA stream for asynchronous execution
-            )
-
-            # Asynchronously copy results back
-            drv.memcpy_dtoh_async(batch_results_array, results_gpu, self.stream)
-
-            # Synchronize the stream to ensure data is ready
-            self.stream.synchronize()
-
-            # Copy batch results into the overall results array
-            results_array[batch_start:batch_end] = batch_results_array
-
-            # Free per-batch results_gpu
-            results_gpu.free()
-
-        # Aggregate results based on the initial move
-        move_results = {}
-        for idx in range(num_sequences):
-            result = results_array[idx]
-            if result == -2:
-                continue  # Skip invalid sequences
-
-            temp_idx = idx
-            initial_move_idx = 0
-            for d in range(depth):
-                initial_move_idx = temp_idx % num_valid_moves
-                temp_idx //= num_valid_moves
-
-            initial_move = valid_moves[initial_move_idx]
-
-            if initial_move not in move_results:
-                move_results[initial_move] = {'red_win': 0, 'yellow_win': 0, 'undecided': 0}
-
-            if result == 1:
-                move_results[initial_move]['red_win'] += 1
-            elif result == -1:
-                move_results[initial_move]['yellow_win'] += 1
-            else:
-                move_results[initial_move]['undecided'] += 1
-
-        # Calculate percentages
-        for col, stats in move_results.items():
-            total = sum(stats.values())
-            percentages = {key: (value / total) * 100 if total > 0 else 0 for key, value in stats.items()}
-            percentages['tie'] = 0.0
-            move_statistics[col] = {'percentages': percentages}
-
-        return move_statistics
-
-
-    def get_board_state(self):
-        return self.board
-
-    def check_move_color(self):
+    def check_move_color(self, board=None):
+        board = self.board if board is None else board
         # Determine turn based on the piece count; 1 if even (Red), -1 if odd (Yellow)
-        piece_count = np.count_nonzero(self.board)
+        piece_count = np.count_nonzero(board)
         return 1 if piece_count % 2 == 0 else -1
 
     def get_valid_moves(self, board=None):
         board = self.board if board is None else board
         # Valid moves are columns where the top cell is empty
-        valid_columns = [col for col in range(self.cols) if board[0, col] == 0]
-        return valid_columns
+        return [col for col in range(self.cols) if board[0, col] == 0]
 
     def apply_move(self, board, col, color):
         # Place the piece in the lowest available row in the selected column
@@ -349,16 +41,15 @@ class Connect4:
             if board[row, col] == 0:
                 board[row, col] = color
                 return row, col  # Return the position where the piece was placed
-        return None  # The column is full; should not happen if checked before
+        return None  # The column is full
 
-    def is_full(self, board=None):
-        board = self.board if board is None else board
+    def is_full(self, board):
         # The board is full if there are no empty cells in the top row
         return np.all(board[0, :] != 0)
 
-    def check_winner(self, board, color, row, col):
+    def check_winner(self, board, color, last_row, last_col):
         """
-        Checks if the last move at (row, col) created a winning sequence for the given color.
+        Checks if the last move at (last_row, last_col) created a winning sequence for the given color.
         """
         directions = [
             (0, 1),   # Horizontal
@@ -371,7 +62,7 @@ class Connect4:
             count = 1  # Start with the last move itself
 
             # Check in the positive direction
-            r, c = row + dr, col + dc
+            r, c = last_row + dr, last_col + dc
             while 0 <= r < self.rows and 0 <= c < self.cols and board[r, c] == color:
                 count += 1
                 if count >= 4:
@@ -380,7 +71,7 @@ class Connect4:
                 c += dc
 
             # Check in the negative direction
-            r, c = row - dr, col - dc
+            r, c = last_row - dr, last_col - dc
             while 0 <= r < self.rows and 0 <= c < self.cols and board[r, c] == color:
                 count += 1
                 if count >= 4:
@@ -390,16 +81,235 @@ class Connect4:
 
         return False
 
-    def get_game_result(self, board, color, row, col):
+    def get_game_result(self, board, color, last_row, last_col):
         """
         Check for a game result after the last move.
         """
-        if self.check_winner(board, color, row, col):
+        if self.check_winner(board, color, last_row, last_col):
             return "red_win" if color == 1 else "yellow_win"
         elif self.is_full(board):
             return "tie"
         else:
             return "undecided"
+
+    def build_game_tree(self, depth):
+        """
+        Builds the game tree up to a certain depth using recursive traversal.
+        """
+        initial_state = self.board.copy()
+        initial_state_tuple = tuple(initial_state.flatten())
+        self.game_graph.clear()
+        self.game_graph.add_node(initial_state_tuple)
+        self._build_tree_recursive(initial_state, depth, initial_state_tuple)
+
+    def _build_tree_recursive(self, board, depth, parent_state_tuple):
+        if depth == 0:
+            return
+        color = self.check_move_color(board)
+        valid_moves = self.get_valid_moves(board)
+
+        for move in valid_moves:
+            new_board = board.copy()
+            result = self.apply_move(new_board, move, color)
+            if result is None:
+                continue  # Skip if the move is invalid
+            new_state_tuple = tuple(new_board.flatten())
+            if new_state_tuple in self.game_graph:
+                # Avoid cycles
+                self.game_graph.add_edge(parent_state_tuple, new_state_tuple, move=move, player=color)
+                continue
+            self.game_graph.add_node(new_state_tuple)
+            self.game_graph.add_edge(parent_state_tuple, new_state_tuple, move=move, player=color)
+            last_row, last_col = result
+            game_result = self.get_game_result(new_board, color, last_row, last_col)
+            if game_result != "undecided":
+                self.game_graph.nodes[new_state_tuple]['result'] = game_result
+            else:
+                self._build_tree_recursive(new_board, depth - 1, new_state_tuple)
+
+    def evaluate_move_statistics(self, depth=4, batch_size=100):
+        """
+        Evaluates move statistics using quantum circuits simulated with Cirq and Pasqal.
+
+        Args:
+            depth (int): The depth of the game tree to explore.
+            batch_size (int): The number of move sequences to process in each batch.
+        """
+        color = self.check_move_color()
+        valid_moves = self.get_valid_moves()
+        move_statistics = {}
+
+        if not valid_moves:
+            return move_statistics  # No moves to evaluate
+
+        # Build the game tree up to the specified depth
+        self.build_game_tree(depth)
+
+        # Get all possible move sequences up to the specified depth
+        paths = []
+        for target_depth in range(1, depth + 1):
+            for path in self._get_paths_of_length(target_depth):
+                paths.append(path)
+
+        total_sequences = len(paths)
+        print(f"Total move sequences to evaluate: {total_sequences}")
+
+        # Process move sequences in batches
+        for batch_start in range(0, total_sequences, batch_size):
+            batch_paths = paths[batch_start:batch_start + batch_size]
+            circuits = []
+            move_indices = []
+            path_end_states = []
+
+            for path in batch_paths:
+                circuit, initial_move, end_state = self._create_circuit_for_path(path)
+                circuits.append(circuit)
+                move_indices.append(initial_move)
+                path_end_states.append(end_state)
+
+            # Simulate the batch of circuits with one repetition each
+            results = self.simulator.run_batch(circuits, repetitions=1)
+
+            # Process results
+            for i, result_list in enumerate(results):
+                move = move_indices[i]
+                result = result_list[0]  # Since we have repetitions=1
+                measurements = result.measurements['m']
+                outcome = self._determine_outcome(measurements, path_end_states[i])
+                if move not in move_statistics:
+                    move_statistics[move] = {'red_win': 0, 'yellow_win': 0, 'tie': 0, 'undecided': 0}
+                move_statistics[move][outcome] += 1
+
+        # Calculate percentages
+        for move in move_statistics:
+            stats = move_statistics[move]
+            total = sum(stats.values())
+            percentages = {key: (value / total) * 100 if total > 0 else 0 for key, value in stats.items()}
+            move_statistics[move] = {'percentages': percentages}
+
+        return move_statistics
+
+    def _get_paths_of_length(self, length):
+        """
+        Get all paths from the root node to nodes at the specified depth (length).
+        """
+        initial_state_tuple = tuple(self.board.flatten())
+        paths = []
+        queue = [(initial_state_tuple, [initial_state_tuple])]
+
+        while queue:
+            (vertex, path) = queue.pop(0)
+            if len(path) - 1 == length:
+                paths.append(path)
+            elif len(path) - 1 < length:
+                for neighbor in self.game_graph.successors(vertex):
+                    queue.append((neighbor, path + [neighbor]))
+
+        return paths
+
+    def _create_circuit_for_path(self, path):
+        circuit = cirq.Circuit()
+        move_sequence = []
+        color_sequence = []
+
+        # Reconstruct the move sequence from the edges
+        for i in range(len(path) - 1):
+            parent = path[i]
+            child = path[i + 1]
+            edge_data = self.game_graph.get_edge_data(parent, child)
+            move_sequence.append(edge_data['move'])
+            color_sequence.append(edge_data['player'])
+
+        initial_move = move_sequence[0]
+        end_state = np.array(path[-1]).reshape(self.rows, self.cols)
+
+        # Apply gates to represent the move sequence
+        for idx, move in enumerate(move_sequence):
+            color = color_sequence[idx]
+            # Get the move position (row, col) in the board
+            parent_state = np.array(path[idx]).reshape(self.rows, self.cols)
+            child_state = np.array(path[idx + 1]).reshape(self.rows, self.cols)
+            diff = child_state - parent_state
+            changed_indices = np.argwhere(diff != 0)
+
+            for pos in changed_indices:
+                row, col = pos
+                qubit = cirq.NamedQubit(f'q_{row}_{col}')
+                if color == 1:
+                    # Red player's move: apply an X gate
+                    circuit.append(cirq.X(qubit))
+                else:
+                    # Yellow player's move: apply an X and Z gate to represent -1
+                    circuit.append([cirq.X(qubit), cirq.Z(qubit)])
+
+        # Measure all qubits
+        circuit.append(cirq.measure(*self.qubits, key='m'))
+
+        return circuit, initial_move, end_state
+                    
+    def _determine_outcome(self, measurements, end_state):
+        """
+        Determine the game outcome based on the qubit measurements.
+
+        Args:
+            measurements (np.ndarray): The measurement results of the qubits.
+            end_state (np.ndarray): The expected end state of the board.
+
+        Returns:
+            str: The game outcome ('red_win', 'yellow_win', 'tie', or 'undecided').
+        """
+        # Reconstruct the board state from measurements
+        board_state = np.zeros((self.rows, self.cols), dtype=int)
+
+        for i, qubit in enumerate(self.qubits):
+            # Parse row and column from qubit name (e.g., "q_0_0" to get row=0, col=0)
+            _, row, col = qubit.name.split('_')
+            row, col = int(row), int(col)
+
+            # Access measurement result carefully
+            try:
+                # If measurements[i] is a single-element array, retrieve the element
+                meas = measurements[i][0] if isinstance(measurements[i], np.ndarray) else measurements[i]
+            except IndexError:
+                # Handle cases where measurements[i] does not exist as expected
+                meas = measurements[0] if measurements.size == 1 else 0
+
+            if meas == 1:
+                # Assign color based on the expected end_state
+                board_state[row, col] = end_state[row, col]
+
+        # Now, check for a win in the board_state
+        last_move_row, last_move_col = self._get_last_move_position(end_state)
+        if last_move_row is None:
+            return 'undecided'
+
+        last_color = end_state[last_move_row, last_move_col]
+        if self.check_winner(board_state, last_color, last_move_row, last_move_col):
+            return 'red_win' if last_color == 1 else 'yellow_win'
+        elif self.is_full(board_state):
+            return 'tie'
+        else:
+            return 'undecided'
+
+
+    def _get_last_move_position(self, end_state):
+        """
+        Find the position of the last move based on the difference from the initial board.
+
+        Args:
+            end_state (np.ndarray): The final state of the board after the move sequence.
+
+        Returns:
+            tuple: (row, col) of the last move, or (None, None) if not found.
+        """
+        initial_state = self.board
+        diff = end_state - initial_state
+        changed_indices = np.argwhere(diff != 0)
+        if changed_indices.size == 0:
+            return None, None
+        # The last move is the last change made
+        last_move_pos = changed_indices[-1]
+        return last_move_pos[0], last_move_pos[1]
 
     def __str__(self):
         color_map = {0: ' . ', 1: ' R ', -1: ' Y '}
